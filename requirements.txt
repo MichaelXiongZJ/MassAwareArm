@@ -1,0 +1,4 @@
+mujoco>=3.2,<4.0
+numpy>=1.26,<3.0
+pyyaml>=6.0
+matplotlib>=3.8
