@@ -38,7 +38,11 @@ python -m mujoco.viewer --mjcf=software/assets/scene.xml
 ```
 
 The viewer should open with the UR5e on a table, three colored cubes, and two bin sites.
-
+## Quick Start
+### Run basic control loop 
+```
+python software/scripts/base_gripper.py
+```
 ## Repository layout
 
 ```
