@@ -12,9 +12,9 @@ The robot and gripper models in this directory are vendored from
 
 ## Local modifications
 
-The vendored XML files have one small edit so they resolve mesh paths correctly when included from `scene.xml`:
+The UR5e XML has one small edit so it resolves mesh paths correctly when included from `scene.xml`:
 
 - `ur5e/ur5e.xml`: `meshdir="assets"` → `meshdir="ur5e/assets"`
-- `gripper/umi_gripper.xml`: `meshdir="assets" texturedir="assets"` → `meshdir="gripper/assets" texturedir="gripper/assets"`
 
-Loading the vendored XMLs directly (without going through `scene.xml`) will therefore fail to find their meshes. Always load via `scene.xml`.
+The gripper is attached as an MJCF sub-model from `scene.xml`, so its mesh and texture paths stay relative to
+`gripper/umi_gripper.xml`: `meshdir="assets" texturedir="assets"`.

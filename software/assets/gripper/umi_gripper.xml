@@ -1,5 +1,5 @@
 <mujoco model="umi_gripper">
-  <compiler angle="radian" meshdir="gripper/assets" texturedir="gripper/assets" />
+  <compiler angle="radian" meshdir="assets" texturedir="assets" />
 
   <option integrator="implicitfast" impratio="10" cone="elliptic" noslip_iterations="2">
     <flag multiccd="enable" />
@@ -35,26 +35,12 @@
         <geom type="cylinder" size="0.0035 0.0035 0.01" material="black" contype="0" conaffinity="0" />
       </default>
 
-      <default class="gripper_slide">
-        <joint type="slide" damping="0.1" range="-1.2 1.2" />
-        <position kp="100" dampratio="1" ctrlrange="-1.2 1.2" />
-      </default>
-      <default class="gripper_hinge">
-        <joint type="hinge" damping="10.1" range="-31.415 31.415" />
-        <position kp="10" dampratio="0.1" ctrlrange="-3.1415 3.1415" />
-      </default>
       <default class="finger_slide">
         <joint type="slide" stiffness="100" damping="10.1" range="0 0.05" />
       </default>
 
       <default class="finger_actuator">
         <position ctrlrange="0 0.05" />
-      </default>
-      <default class="gripper_actuator">
-        <position kp="100" dampratio="1" ctrlrange="-1.2 1.2" />
-      </default>
-      <default class="gripper_rot_actuator">
-        <position kp="10" dampratio="0.1" ctrlrange="-3.1415 3.1415" />
       </default>
 
       <default class="visual">
@@ -79,16 +65,6 @@
 
       <!-- Gripper Camera -->
       <camera name="gripper_gopro" pos="0 -0.092 0.04" quat="0 1 0 0" mode="fixed" fovy="155" />
-
-      <!-- Positional Joints -->
-      <joint name="gripper_joint_x" axis="1 0 0" class="gripper_slide" />
-      <joint name="gripper_joint_y" axis="0 0 1" class="gripper_slide" />
-      <joint name="gripper_joint_z" axis="0 -1 0" class="gripper_slide" />
-
-      <!-- Rotational Joints -->
-      <joint name="gripper_joint_rx" axis="1 0 0" class="gripper_hinge" />
-      <joint name="gripper_joint_ry" axis="0 0 1" class="gripper_hinge" />
-      <joint name="gripper_joint_rz" axis="0 -1 0" class="gripper_hinge" />
 
       <!-- Linear Rail -->
       <geom name="linear_guide_rail" type="box" pos="0 -0.002 0.062" size="0.08 0.003 0.004" material="light_gray"
@@ -162,11 +138,5 @@
 
   <actuator>
     <position name="fingers_actuator" tendon="split" class="finger_actuator" />
-    <position name="gripper_joint_x_act" joint="gripper_joint_x" class="gripper_actuator" />
-    <position name="gripper_joint_y_act" joint="gripper_joint_y" class="gripper_actuator" />
-    <position name="gripper_joint_z_act" joint="gripper_joint_z" class="gripper_actuator" />
-    <position name="gripper_joint_rx_act" joint="gripper_joint_rx" class="gripper_rot_actuator" />
-    <position name="gripper_joint_ry_act" joint="gripper_joint_ry" class="gripper_rot_actuator" />
-    <position name="gripper_joint_rz_act" joint="gripper_joint_rz" class="gripper_rot_actuator" />
   </actuator>
 </mujoco>
