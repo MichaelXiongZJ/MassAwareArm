@@ -3,10 +3,15 @@
 Owns the (MjModel, MjData) lifecycle and exposes the minimum surface area the
 rest of the package needs: step, reset, joint state, sensor reads, end-effector
 pose, and the gravity+Coriolis bias term used by the inverse-dynamics estimator.
+
+If a passive viewer is bound via :meth:`bind_viewer`, ``step`` syncs the viewer
+and paces the inner loop to real time, so the FSM renders smoothly without a
+separate viewer thread (and without the MjData races that come with one).
 """
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import mujoco
@@ -37,10 +42,15 @@ class MujocoEnv:
             [self.model.joint(n).dofadr[0] for n in UR5E_JOINTS]
         )
         self._ee_site_id = self.model.site(EE_SITE).id
+        self._viewer = None
 
     @property
     def dt(self) -> float:
         return self.model.opt.timestep
+
+    def bind_viewer(self, viewer) -> None:
+        """Attach a passive MuJoCo viewer; ``step`` will sync and pace to real time."""
+        self._viewer = viewer
 
     def reset(self, arm_qpos: np.ndarray | None = None) -> None:
         mujoco.mj_resetData(self.model, self.data)
@@ -53,7 +63,13 @@ class MujocoEnv:
         if ctrl is not None:
             self.data.ctrl[: len(ctrl)] = ctrl
         for _ in range(n):
+            t0 = time.perf_counter() if self._viewer is not None else 0.0
             mujoco.mj_step(self.model, self.data)
+            if self._viewer is not None:
+                self._viewer.sync()
+                remaining = self.dt - (time.perf_counter() - t0)
+                if remaining > 0:
+                    time.sleep(remaining)
 
     def get_arm_qpos(self) -> np.ndarray:
         return self.data.qpos[self._ur5e_qpos_adr].copy()
