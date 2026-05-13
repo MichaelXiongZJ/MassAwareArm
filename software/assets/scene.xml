@@ -27,6 +27,9 @@
     <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
 
+    <!-- Overhead camera reserved for Phase 8 perception (HSV blob detection). -->
+    <camera name="overhead" pos="0.55 0 1.6" xyaxes="1 0 0  0 1 0"/>
+
     <!-- 机械臂底座 -->
     <body name="pedestal" pos="0 0 0.125">
       <geom name="pedestal_geom" type="box" size="0.1 0.1 0.125" rgba="0.3 0.3 0.3 1"/>
@@ -155,5 +158,29 @@
             rgba="0.62 0.06 0.04 1"/>
     </body>
   </worldbody>
-  
+
+  <!-- Sensors expose joint state and per-joint actuator torque to Python.
+       Estimators read these (especially actuatorfrc) at every controller tick. -->
+  <sensor>
+    <jointpos name="q_shoulder_pan"   joint="shoulder_pan_joint"/>
+    <jointpos name="q_shoulder_lift"  joint="shoulder_lift_joint"/>
+    <jointpos name="q_elbow"          joint="elbow_joint"/>
+    <jointpos name="q_wrist_1"        joint="wrist_1_joint"/>
+    <jointpos name="q_wrist_2"        joint="wrist_2_joint"/>
+    <jointpos name="q_wrist_3"        joint="wrist_3_joint"/>
+
+    <jointvel name="qdot_shoulder_pan"  joint="shoulder_pan_joint"/>
+    <jointvel name="qdot_shoulder_lift" joint="shoulder_lift_joint"/>
+    <jointvel name="qdot_elbow"         joint="elbow_joint"/>
+    <jointvel name="qdot_wrist_1"       joint="wrist_1_joint"/>
+    <jointvel name="qdot_wrist_2"       joint="wrist_2_joint"/>
+    <jointvel name="qdot_wrist_3"       joint="wrist_3_joint"/>
+
+    <actuatorfrc name="tau_shoulder_pan"  actuator="shoulder_pan"/>
+    <actuatorfrc name="tau_shoulder_lift" actuator="shoulder_lift"/>
+    <actuatorfrc name="tau_elbow"         actuator="elbow"/>
+    <actuatorfrc name="tau_wrist_1"       actuator="wrist_1"/>
+    <actuatorfrc name="tau_wrist_2"       actuator="wrist_2"/>
+    <actuatorfrc name="tau_wrist_3"       actuator="wrist_3"/>
+  </sensor>
 </mujoco>
