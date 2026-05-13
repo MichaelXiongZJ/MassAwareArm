@@ -22,16 +22,15 @@ Companion to [ARCHITECTURE.md](ARCHITECTURE.md). Build order is **bottom-up to f
 
 1. Extend `assets/scene.xml`:
    - Add the gripper as a child of the UR5e wrist body.
-   - Add `<actuator>` entries (`motor` or `position`) for the 4 active joints.
+   - Confirm `<actuator>` entries cover all 6 UR5e joints (the vendor `ur5e.xml` already provides these).
    - Add `<sensor>` entries: `jointpos`, `jointvel`, `actuatorfrc` per joint.
    - Add an overhead `<camera name="overhead">` (you won't use it yet, just reserve it).
 2. Implement `massaware/mujoco_env.py`:
    - `class MujocoEnv` wrapping `mj_model`, `mj_data`.
    - Methods: `reset()`, `step()`, `get_sensor(name)`, `get_qpos()`, `get_qvel()`.
 3. Implement `massaware/robot.py`:
-   - `JointSubset` — maps "4 active joint indices" ↔ full UR5e joint array.
-   - `fk(q)`, `jacobian_ee(q)` — both as wrappers around `mj_fwdPosition` / `mj_jac`.
-   - `ik(target_xyz, q_seed)` — numerical IK (damped least-squares is fine).
+   - `fk(q)`, `jacobian_ee(q)` — wrappers around `mj_kinematics` / `mj_jacSite`. Operate on the full 6-DOF joint vector.
+   - `ik(target_xyz, q_seed)` — numerical IK (damped least-squares). With 6 DOF and a 3-D position target the IK is underdetermined; seed from `HOME_QPOS` (or current pose) to bias toward consistent gripper orientation. Clip per-iteration step and wrap the final result to the seed's 2π branch to avoid joint-wrap-around solutions.
 
 **Done check:** `scripts/run.py` (stub) loads scene, steps 1000 ticks, prints final EE position; gravity makes the arm sag if actuators are disabled.
 
@@ -46,7 +45,7 @@ Companion to [ARCHITECTURE.md](ARCHITECTURE.md). Build order is **bottom-up to f
    - `compute(q, q_dot, q_ref) → tau_cmd`. When `use_gravity_comp=True`, add `qfrc_bias` from MuJoCo.
    - Internal integral state, with `reset()`.
 2. Wire it into `mujoco_env.step()` at 500 Hz inner loop (N controller ticks per env step).
-3. Hand-tune gains for the 4 active joints empirically.
+3. Hand-tune gains for all 6 joints empirically.
 
 **Done check:** with empty gripper, PID holds an arbitrary pose; `‖q_ref - q‖ < 1e-3 rad` after 0.5 s settle. Disable gravity comp during this test.
 

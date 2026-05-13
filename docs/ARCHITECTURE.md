@@ -10,7 +10,7 @@ A robot arm in a MuJoCo simulation picks colored cubes, **infers each cube's mas
 3. **Clean layer boundaries** — perception, control, estimation, and planning don't know about each other's internals.
 
 **Confirmed decisions:**
-- **Arm:** UR5e geometry with 4 active joints (a `JointSubset` adapter locks the other two).
+- **Arm:** UR5e with all 6 joints actively controlled. (We initially explored a 4-active-joint subset, but the locked-joint configuration removed too much gripper-orientation freedom for reliable top-down grasps across the workspace. Full 6-DOF gives orientation-aware IK and a cleaner reach.)
 - **Perception:** Pluggable; first impl reads MuJoCo ground truth, camera+CV swappable later.
 - **Planner:** Finite State Machine.
 - **Extended estimator in scope:** Momentum / disturbance observer (time-integrating; the interface must support stateful estimators).
@@ -129,7 +129,7 @@ software/
 │
 ├── massaware/
 │   ├── mujoco_env.py         # sim wrapper (load, step, reset, sensors)
-│   ├── robot.py              # FK / IK / Jacobian + 6→4 joint subset
+│   ├── robot.py              # FK / IK / Jacobian (6-DOF)
 │   ├── controller.py         # joint-space PID
 │   ├── planner.py            # FSM + motion primitives
 │   ├── classify.py           # threshold classifier
@@ -161,7 +161,7 @@ Adding a new estimator = drop one file in `estimators/` and register it. Adding 
 
 Existing stub already has the table, three cubes, and two bin sites. To make it run:
 
-- Add `<actuator>` for the 4 active UR5e joints.
+- Confirm `<actuator>` entries cover all 6 UR5e joints (the vendor `ur5e.xml` already provides these).
 - Attach the chosen gripper to the UR5e wrist.
 - Add an overhead `<camera>` (for the future perception swap).
 - Add `<sensor>` entries: joint pos/vel, actuator force.
