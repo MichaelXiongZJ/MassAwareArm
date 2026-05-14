@@ -73,6 +73,7 @@ class TickLoop:
                 q_dot=self.env.get_arm_qvel(),
                 q_ref=ctx.arm_target,
                 qfrc_bias=self.env.qfrc_bias,
+                dt=self.env.dt,
             )
             self.env.set_arm_ctrl(tau)
             self.gripper.apply(ctx.gripper_cmd)

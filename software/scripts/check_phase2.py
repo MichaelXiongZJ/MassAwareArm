@@ -32,6 +32,7 @@ def main() -> int:
             q_dot=env.get_arm_qvel(),
             q_ref=HOME_QPOS,
             qfrc_bias=env.qfrc_bias,
+            dt=env.dt,
         )
         env.set_arm_ctrl(tau)
         mujoco.mj_step(env.model, env.data)
@@ -52,6 +53,7 @@ def main() -> int:
             q_dot=env.get_arm_qvel(),
             q_ref=target_q,
             qfrc_bias=env.qfrc_bias,
+            dt=env.dt,
         )
         env.set_arm_ctrl(tau)
         mujoco.mj_step(env.model, env.data)
@@ -79,6 +81,7 @@ def main() -> int:
             q_dot=env.get_arm_qvel(),
             q_ref=ref,
             qfrc_bias=env.qfrc_bias,
+            dt=env.dt,
         )
         env.set_arm_ctrl(tau)
         mujoco.mj_step(env.model, env.data)

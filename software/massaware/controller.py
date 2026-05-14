@@ -24,12 +24,13 @@ class PIDController:
         q_dot: np.ndarray,
         q_ref: np.ndarray,
         qfrc_bias: np.ndarray,
+        dt: float,
         *,
         use_gravity_comp: bool = True,
     ) -> np.ndarray:
         """Compute control torques (Nm)."""
         err = q_ref - q
-        self._integral_err += err
+        self._integral_err += err * dt
         
         tau = (self.kp * err) + (self.ki * self._integral_err) - (self.kd * q_dot)
         

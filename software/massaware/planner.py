@@ -226,6 +226,7 @@ class GraspState(_SequenceState):
             MoveToCartesianStep(cube.xyz),
             GripperStep(GripperCmd.CLOSE),
             MoveToCartesianStep(lift),
+            # SettleStep(tol=0.2, timeout=3.0), # optional, but (should?) stablize arm before estimating
         ])
 
     def tick(self, ctx: PlannerContext) -> str | None:
