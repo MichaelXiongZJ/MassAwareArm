@@ -1,4 +1,4 @@
-"""Forward / inverse kinematics for the UR5e (all 6 joints active)."""
+"""Forward / inverse kinematics for the UR5e."""
 
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ from massaware.mujoco_env import EE_SITE, MujocoEnv
 
 
 class Robot:
+    """IK and FK utilities."""
+
     def __init__(self, env: MujocoEnv):
         self.env = env
         self._ee_site_id = env.model.site(EE_SITE).id
@@ -18,7 +20,7 @@ class Robot:
 
     @contextmanager
     def _at(self, q: np.ndarray):
-        """Temporarily set arm qpos to ``q`` and run kinematics; restore on exit."""
+        """Temporarily set arm state for kinematics; restore on exit."""
         q_saved = self.env.data.qpos.copy()
         self.env.set_arm_qpos(q)
         mujoco.mj_kinematics(self.env.model, self.env.data)
@@ -31,14 +33,14 @@ class Robot:
             mujoco.mj_comPos(self.env.model, self.env.data)
 
     def fk(self, q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Return (xyz, 3x3 rot) of the EE for a 6-vector arm qpos."""
+        """Forward kinematics: return (xyz, 3x3 rot)."""
         with self._at(q):
             xyz = self.env.data.site_xpos[self._ee_site_id].copy()
             rot = self.env.data.site_xmat[self._ee_site_id].reshape(3, 3).copy()
         return xyz, rot
 
     def jacobian_ee(self, q: np.ndarray) -> np.ndarray:
-        """3x6 linear Jacobian of the EE site w.r.t. the UR5e joints."""
+        """Linear Jacobian of end-effector site."""
         with self._at(q):
             jacp = np.zeros((3, self.env.model.nv))
             mujoco.mj_jacSite(self.env.model, self.env.data, jacp, None, self._ee_site_id)
@@ -55,14 +57,7 @@ class Robot:
         step_scale: float = 0.5,
         max_step: float = 0.1,
     ) -> tuple[np.ndarray, bool]:
-        """Position-only DLS IK on the 6-DOF UR5e.
-
-        Underdetermined (3 eqns, 6 unknowns) so ``q_seed`` selects the branch.
-        ``max_step`` caps ``‖dq‖`` per iteration to keep DLS from marching
-        through workspace singularities; the converged result is wrapped to
-        the seed's 2π branch so the position actuator tracks the nearest
-        physical angle.
-        """
+        """Position-only DLS inverse kinematics."""
         q = q_seed.astype(float).copy()
         target_xyz = np.asarray(target_xyz, dtype=float)
         I_n = np.eye(len(q))

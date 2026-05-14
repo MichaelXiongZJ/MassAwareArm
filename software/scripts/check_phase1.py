@@ -1,17 +1,16 @@
-"""Phase 1 done check: scene loads, sensors/camera present, FK / Jacobian /
-IK exercised on the full 6-DOF arm, and the position actuator settles near
-home under gravity.
-"""
+"""Comprehensive verification of robot model, kinematics, and basic control."""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
+import mujoco
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from massaware.controller import PIDController
 from massaware.mujoco_env import MujocoEnv
 from massaware.robot import Robot
 
@@ -23,45 +22,60 @@ def main() -> int:
     env = MujocoEnv()
     robot = Robot(env)
 
-    print(f"Model loaded: nq={env.model.nq}, nu={env.model.nu}, "
-          f"nsensor={env.model.nsensor}, ncam={env.model.ncam}")
-    assert env.model.nsensor > 0, "scene.xml is missing the <sensor> block"
-    assert env.model.ncam > 0, "scene.xml is missing the overhead camera"
-
+    print(f"Model loaded: nq={env.model.nq}, nu={env.model.nu}, nsensor={env.model.nsensor}")
+    
+    # 1. Component Verification
+    assert env.model.nsensor > 0, "Missing sensors"
+    assert env.model.ncam > 0, "Missing camera"
+    assert "gripper_fingers_actuator" in [env.model.actuator(i).name for i in range(env.model.nu)]
+    
+    # 2. Kinematics Verification
     env.reset(arm_qpos=HOME_QPOS)
-    print(f"reset -> arm qpos = {np.round(env.get_arm_qpos(), 3)}")
-
     xyz, _ = robot.fk(HOME_QPOS)
     print(f"FK(home) -> EE xyz = {np.round(xyz, 4)}")
 
     J = robot.jacobian_ee(HOME_QPOS)
-    print(f"Jacobian shape = {J.shape}, rank = {np.linalg.matrix_rank(J)}")
+    print(f"Jacobian rank = {np.linalg.matrix_rank(J)}")
     assert J.shape == (3, 6)
 
     target = xyz + np.array([0.05, 0.0, -0.05])
     q_ik, ok = robot.ik(target, q_seed=HOME_QPOS)
     xyz_ik, _ = robot.fk(q_ik)
-    print(f"IK target={np.round(target, 4)} -> solved={np.round(q_ik, 3)} "
-          f"({'converged' if ok else 'did NOT converge'}); "
-          f"residual={np.linalg.norm(target - xyz_ik):.2e}")
+    print(f"IK convergence: {ok}, residual: {np.linalg.norm(target - xyz_ik):.2e}")
+    assert ok, "IK failed to converge"
 
-    env.step(ctrl=HOME_QPOS, n=1000)
+    # 3. Control & Stability Verification
+    # Using run.py baseline gains
+    controller = PIDController(
+        kp=[2000, 2000, 2000, 500, 500, 500],
+        kd=[400, 400, 400, 100, 100, 100],
+        ki=[0.0] * 6,
+    )
+
+    print("Settling at HOME_QPOS (3000 steps)...")
+    for i in range(3000):
+        tau = controller.compute(
+            q=env.get_arm_qpos(),
+            q_dot=env.get_arm_qvel(),
+            q_ref=HOME_QPOS,
+            qfrc_bias=env.qfrc_bias,
+        )
+        env.set_arm_ctrl(tau)
+        mujoco.mj_step(env.model, env.data)
+        if i % 500 == 0:
+            err = np.linalg.norm(env.get_arm_qpos() - HOME_QPOS)
+            print(f"  T+{i*env.dt:.1f}s error: {err:.3e}")
+    
     settle_err = np.linalg.norm(env.get_arm_qpos() - HOME_QPOS)
     qdot = np.linalg.norm(env.get_arm_qvel())
-    print(f"after 1000 steps: ||q_err||={settle_err:.3e}, ||qdot||={qdot:.3e}")
-    # Built-in position actuator has finite gain; ~3 deg under gravity is
-    # expected. Phase 2's custom PID with integral will tighten this.
-    assert settle_err < 5e-2, "arm failed to settle near home pose"
+    print(f"Final settle error: {settle_err:.3e}, Velocity: {qdot:.3e}")
+    
+    assert settle_err < 1e-2, f"Arm failed to settle (err={settle_err:.2e})"
     assert not np.any(np.isnan(env.data.qpos))
 
-    print("\n--- sensor reads (sample) ---")
-    for name in ("q_shoulder_pan", "qdot_shoulder_pan", "tau_shoulder_pan"):
-        print(f"  {name} = {env.get_sensor(name)}")
-    print(f"qfrc_bias (UR5e dofs) = {np.round(env.qfrc_bias, 3)}")
-
-    print("\nPhase 1 done-check: OK")
+    print("\nVerification OK")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())
