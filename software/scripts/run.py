@@ -58,6 +58,10 @@ def main() -> int:
     if args.viewer:
         import mujoco.viewer
         with mujoco.viewer.launch_passive(env.model, env.data) as viewer:
+            viewer.cam.lookat = np.array([0.25, 0.0, 0.4])
+            viewer.cam.distance = 2
+            viewer.cam.azimuth = 180
+            viewer.cam.elevation = -20
             loop = TickLoop(env, fsm, gripper, controller, viewer=viewer)
             loop.run()
             _print_summary(env, target_body, initial_pos, ctx.trace)
