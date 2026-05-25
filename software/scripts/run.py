@@ -30,25 +30,27 @@ def build_controller() -> PIDController:
     return PIDController(kp=kp, ki=ki, kd=kd)
 
 
-def build() -> tuple[MujocoEnv, PlannerContext]:
-    """Initialize environment and planner context."""
+def build() -> tuple[MujocoEnv, PlannerContext, PIDController]:
+    """Initialize environment, controller, and planner context."""
     cfg = load_config()
-    
+
     env = MujocoEnv()
     env.reset(arm_qpos=cfg["poses"]["home_qpos"])
     robot = Robot(env)
-    
+    controller = build_controller()
+
     ctx = PlannerContext(
         env=env,
         robot=robot,
         perception=GroundTruthPerception(env),
+        controller=controller,
         target_color=TARGET_COLOR,
         home_qpos=cfg["poses"]["home_qpos"],
         weigh_qpos=cfg["poses"]["weigh_qpos"],
         light_bin_drop=cfg["poses"]["light_bin_drop"],
         heavy_bin_drop=cfg["poses"]["heavy_bin_drop"],
     )
-    return env, ctx
+    return env, ctx, controller
 
 
 def main() -> int:
@@ -56,12 +58,11 @@ def main() -> int:
     ap.add_argument("--viewer", action="store_true")
     args = ap.parse_args()
 
-    env, ctx = build()
+    env, ctx, controller = build()
     target_body = f"{TARGET_COLOR}_cube"
     initial_pos = env.data.xpos[env.model.body(target_body).id].copy()
 
     gripper = Gripper(env)
-    controller = build_controller()
     fsm = FSM(ctx)
 
     if args.viewer:
@@ -71,14 +72,14 @@ def main() -> int:
             viewer.cam.distance = 2
             viewer.cam.azimuth = 180
             viewer.cam.elevation = -20
-            loop = TickLoop(env, fsm, gripper, controller, viewer=viewer)
+            loop = TickLoop(env, fsm, gripper, controller, ctx.robot, viewer=viewer)
             loop.run()
             _print_summary(env, target_body, initial_pos, ctx.trace)
             while viewer.is_running():
                 viewer.sync()
                 time.sleep(0.02)
     else:
-        loop = TickLoop(env, fsm, gripper, controller)
+        loop = TickLoop(env, fsm, gripper, controller, ctx.robot)
         loop.run()
         _print_summary(env, target_body, initial_pos, ctx.trace)
     return 0
