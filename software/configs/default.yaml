@@ -1,0 +1,14 @@
+poses:
+  home_qpos: [0, -90, -90, -90, 90, 0]   # degrees, converted at load time
+  weigh_qpos: [0, -90, -90, -90, 90, 0]  # matches home_qpos
+  light_bin_drop: [0.0, 0.60, 0.55]      # metres, world frame
+  heavy_bin_drop: [0.0, -0.60, 0.55]     # metres, world frame
+
+estimator:
+  name: "pid_error"                      # swappable: pid_error | inverse_dynamics | momentum_observer
+  pid_error:
+    measurement_joints: [1]              # shoulder_lift
+    moment_arm: 0.5                      # TBD — measured during Sub-phase D
+
+classifier:
+  mass_threshold: 0.35                   # kg — boundary between "light" and "heavy"

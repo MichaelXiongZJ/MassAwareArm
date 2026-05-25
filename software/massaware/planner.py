@@ -14,14 +14,8 @@ from massaware.tick_loop import GripperCmd
 
 # --- Constants ---
 
-HOME_QPOS = np.deg2rad([0, -90, -90, -90, 90, 0])
-
 APPROACH_DZ = 0.10  # m above target before descending
 LIFT_DZ = 0.15      # m above grasp after closing the gripper
-
-# Drop inside the light bin footprint (bin spans y ∈ 0.54..0.82, top at
-# z=0.365 with walls to z≈0.42).
-LIGHT_BIN_DROP = np.array([0.0, 0.60, 0.55])
 
 
 @dataclass
@@ -32,6 +26,12 @@ class PlannerContext:
     target_color: str = "green"
     target_cube: CubeDetection | None = None
     trace: list[str] = field(default_factory=list)
+
+    # Configured poses
+    home_qpos: np.ndarray = field(default_factory=lambda: np.zeros(6))
+    weigh_qpos: np.ndarray = field(default_factory=lambda: np.zeros(6))
+    light_bin_drop: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    heavy_bin_drop: np.ndarray = field(default_factory=lambda: np.zeros(3))
 
     # Control outputs
     arm_target: np.ndarray | None = None
@@ -238,7 +238,7 @@ class PlaceState(_SequenceState):
 
     def enter(self, ctx: PlannerContext) -> None:
         self._init_steps(ctx, [
-            MoveToCartesianStep(LIGHT_BIN_DROP),
+            MoveToCartesianStep(ctx.light_bin_drop),
             GripperStep(GripperCmd.OPEN),
         ])
 
@@ -250,7 +250,7 @@ class HomeState(_SequenceState):
     name = "HOME"
 
     def enter(self, ctx: PlannerContext) -> None:
-        self._init_steps(ctx, [MoveToJointStep(HOME_QPOS)])
+        self._init_steps(ctx, [MoveToJointStep(ctx.home_qpos)])
 
     def tick(self, ctx: PlannerContext) -> str | None:
         result = self._tick_steps(ctx, on_done="DONE")

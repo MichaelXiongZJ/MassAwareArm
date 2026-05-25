@@ -14,9 +14,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from massaware.controller import PIDController
 from massaware.mujoco_env import MujocoEnv
 from massaware.perception import GroundTruthPerception
-from massaware.planner import FSM, HOME_QPOS, PlannerContext
+from massaware.planner import FSM, PlannerContext
 from massaware.robot import Robot
 from massaware.tick_loop import Gripper, TickLoop
+from massaware.config import load_config
 
 TARGET_COLOR = "blue"
 
@@ -31,15 +32,23 @@ def build_controller() -> PIDController:
 
 def build() -> tuple[MujocoEnv, PlannerContext]:
     """Initialize environment and planner context."""
+    cfg = load_config()
+    
     env = MujocoEnv()
-    env.reset(arm_qpos=HOME_QPOS)
+    env.reset(arm_qpos=cfg["poses"]["home_qpos"])
     robot = Robot(env)
-    return env, PlannerContext(
+    
+    ctx = PlannerContext(
         env=env,
         robot=robot,
         perception=GroundTruthPerception(env),
         target_color=TARGET_COLOR,
+        home_qpos=cfg["poses"]["home_qpos"],
+        weigh_qpos=cfg["poses"]["weigh_qpos"],
+        light_bin_drop=cfg["poses"]["light_bin_drop"],
+        heavy_bin_drop=cfg["poses"]["heavy_bin_drop"],
     )
+    return env, ctx
 
 
 def main() -> int:
