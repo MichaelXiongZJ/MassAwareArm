@@ -90,20 +90,25 @@ Companion to [ARCHITECTURE.md](ARCHITECTURE.md). Build order is **bottom-up to f
 
 ---
 
-## Phase 5 — Calibration + PID-Error Estimator (1–2 days)
+## Phase 5 — Calibration + Baseline Estimators (PID-Error & Lyapunov) (1–2 days)
 
-**Goal:** add the second baseline estimator and prove the swap.
+**Goal:** add the second and third baseline estimators and prove the swap.
 
 1. Write `scripts/calibrate.py`:
-   - Move empty arm to `WEIGH_POSE`, hold with pure PID (no gravity comp), record `tau_ss_empty` over N samples.
+   - Move empty arm to `WEIGH_POSE`.
+   - Run with measurement joint uncompensated: record `tau_ss_empty`.
+   - Run with all joints compensated: record `q_empty`.
    - Save to `configs/calibration.yaml`.
 2. Add `INIT` state to the FSM that loads (or runs) calibration before `SEARCH`.
 3. Implement `massaware/estimators/pid_error.py`:
-   - `update(obs)`: collect `tau_cmd` at shoulder (or weighted sum across load-bearing joints).
-   - `estimate()`: `m_hat = (mean(tau_cmd) - tau_ss_empty) / (g · moment_arm_at_WEIGH_POSE)`.
-4. Switch estimator via `configs/default.yaml` only — *zero* other code changes.
+   - `update(obs)`: collect `tau_cmd` at measurement joint.
+   - `estimate()`: `m_hat = (mean(tau_cmd) - tau_ss_empty) / (g · moment_arm)`.
+4. Implement `massaware/estimators/lyapunov.py`:
+   - `update(obs)`: collect `q` (joint positions).
+   - `estimate()`: calculate $\Delta E_{spring}$ from $q - q_{empty}$ and $\Delta h$ from forward kinematics, return $m = \Delta E_{spring} / (g \cdot \Delta h)$.
+5. Switch estimator via `configs/default.yaml` only — *zero* other code changes.
 
-**Done check:** with `estimator: pid_error` in config, run the full pipeline; sorting still works. Compare `m_hat` from both estimators on the same cube — both should be in the right ballpark (`±20%` for PID-error, `±5%` for inverse-dynamics).
+**Done check:** with `estimator: pid_error` or `estimator: lyapunov` in config, run the full pipeline; sorting still works. Compare `m_hat` from both estimators — both should be in the right ballpark.
 
 ---
 
@@ -160,7 +165,7 @@ Phase 3  Primitives + Bare FSM (pick-and-place, no weighing)
    │
 Phase 4  Inverse-Dynamics Estimator  ←── first working sort demo
    │
-Phase 5  Calibration + PID-Error Estimator
+Phase 5  Calibration + PID-Error & Lyapunov Estimators
    │
 Phase 6  Momentum Observer
    │
