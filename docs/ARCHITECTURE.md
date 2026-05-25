@@ -106,11 +106,15 @@ class EstimateResult:
 ```
 
 This shape works for every method on the table:
-- **PID-error** — read `q_ref - q`, `tau_cmd`; subtract calibrated `tau_ss_empty`.
+- **PID-error** — read `tau_cmd`; subtract calibrated `tau_ss_empty`.
+- **Lyapunov (Spring-Sag)** — read joint sag `q_loaded - q_empty`; compute elastic energy / gravity displacement.
 - **Inverse-dynamics residual** — read `tau_meas - qfrc_bias`; project onto `Jᵀg`.
 - **Momentum observer** — uses `update()` every tick to integrate; `estimate()` returns the converged value.
 
-All three share the same PID controller — they only differ in which signals they read during the `WEIGH` state. Note: PID-error assumes a *pure* PID (no gravity compensation); the controller exposes a `use_gravity_comp` flag that must be **off** during `WEIGH` so the steady-state command carries the payload signal. Inverse-dynamics and momentum observer are controller-agnostic.
+All estimators share the same PID controller. To support different gravity compensation needs without cluttering the controller, the controller always runs with `use_gravity_comp=False`. Instead, a **per-joint gravity compensation mask** is multiplied by `qfrc_bias` and added to the torque in the tick loop. 
+- The PID-error method masks out the measurement joint (so the PID integral winds up and holds the payload).
+- The Lyapunov method keeps the mask at all-ones (so the arm only sags due to the payload).
+- Inverse-dynamics and momentum observer are generally controller-agnostic.
 
 **Registration:** `estimators/registry.py` exposes `register(name, cls)` and `build(name, cfg)`. Config picks the active estimator by name — no other file changes.
 
@@ -134,6 +138,7 @@ software/
 │   ├── planner.py            # FSM + motion primitives
 │   ├── classify.py           # threshold classifier
 │   ├── log.py                # structured CSV logger
+│   ├── config.py             # YAML loader and type converter
 │   ├── perception/
 │   │   ├── base.py
 │   │   └── groundtruth.py    # camera_cv.py added later
@@ -141,11 +146,12 @@ software/
 │       ├── base.py           # Estimator ABC, EstimatorObs, EstimateResult
 │       ├── registry.py
 │       ├── pid_error.py
+│       ├── lyapunov.py       # energy-based spring-sag method
 │       ├── inverse_dynamics.py
 │       └── momentum_observer.py
 │
 ├── configs/
-│   └── default.yaml          # gains, poses, threshold, estimator name
+│   └── default.yaml          # poses, threshold, estimator name and settings
 │
 └── scripts/
     ├── run.py                # one full pipeline run
