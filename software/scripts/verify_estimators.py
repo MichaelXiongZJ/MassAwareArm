@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import sys
 import time
 from pathlib import Path
@@ -37,9 +38,10 @@ from scripts.mission import build
 # Multiplicative steps give automatic density at the light end (where the
 # sag-based method's noise floor lives) without losing coverage of the heavy
 # edge. The ratio between successive trials is about 1.26x.
-M_MIN, M_MAX, N_MASSES = 0.01, 2.5, 25
+M_MIN, M_MAX, N_MASSES = 0.01, 3, 20
 DEFAULT_MASSES: list[float] = [
-    round(float(m), 4) for m in np.geomspace(M_MIN, M_MAX, num=N_MASSES)
+    round(float(m), 4) for m in np.geomspace(M_MIN, M_MAX, num=N_MASSES) # log
+    # round(float(m), 4) for m in np.linspace(M_MIN, M_MAX, num=N_MASSES) # linear
 ]
 DEFAULT_ESTIMATORS: list[str] = ["pid_error", "lyapunov", "momentum_observer"]
 
@@ -115,7 +117,7 @@ def main() -> int:
                     help="run a single estimator instead of all known")
     ap.add_argument("--masses", default=None,
                     help="comma-separated list of cube masses (kg); "
-                         "default is 0.2,0.5")
+                         "default is 25 geometrically-spaced masses from 10g to 2.5kg")
     ap.add_argument("--clear-cache", action="store_true",
                     help="delete configs/calibration.yaml before starting")
     ap.add_argument("--viewer", action="store_true",
@@ -188,6 +190,19 @@ def main() -> int:
         print(f"{est_name:<18} {mean_err:>+9.1f}% {mean_abs:>11.1f}% {rmse:>9.1f}%")
 
     print(f"\nsweep took {elapsed:.1f} s over {len(rows)} trials")
+
+    # ── CSV output ────────────────────────────────────────────────────
+    results_dir = Path(__file__).resolve().parents[2] / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+    csv_path = results_dir / f"sweep_{stamp}.csv"
+    with open(csv_path, "w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["estimator", "true_mass", "m_hat", "sigma", "err_pct"])
+        for r in rows:
+            sigma = r["sigma"] if r["sigma"] == r["sigma"] else ""
+            writer.writerow([r["estimator"], r["mass"], r["m_hat"], sigma, f"{r['err_pct']:.4f}"])
+    print(f"wrote {csv_path.relative_to(results_dir.parent)} ({len(rows)} rows)")
     return 0
 
 
