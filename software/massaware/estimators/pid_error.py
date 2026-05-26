@@ -14,8 +14,8 @@ so the mass is
     m_hat = (mean(tau_cmd) - tau_ss_empty) / (g * moment_arm)
 
 `tau_ss_empty` is captured at INIT via `calibrate()` (same pose, same mask,
-empty gripper). `moment_arm` is hand-tuned in config and pinned for
-later FK-derivation (see docs/PINNED_ISSUES.md P1).
+empty gripper). `moment_arm` is hand-tuned in config today; the comment in
+`configs/default.yaml` records the FK-derived target value.
 """
 
 from __future__ import annotations

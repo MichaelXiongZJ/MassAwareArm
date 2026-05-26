@@ -2,12 +2,13 @@
 
 MAE C263C Project, Team 8 Armstrong. A simulated UR5e in MuJoCo picks a cube off a conveyor, infers the cube's mass without a force sensor or any external scale, and drops it in the correct bin. The point of the project is not the pick-and-place: it is the comparison between several mass estimators that can be slotted into the same arm and judged side by side.
 
-Two estimators are implemented so far. The first reads the controller's steady-state torque command at a single joint while gravity compensation is selectively disabled, and converts that torque to a payload mass through a known geometric moment arm. The second leaves gravity compensation on, softens the controller into a multi-dimensional spring, lets the arm sag a few millimetres under the payload, and recovers the mass from the energy balance between spring storage and gravitational potential. The two methods read different sensor channels (joint torque versus joint position), so even though they end up coupled through the same equilibrium, they fail in different ways. That is the property the case study is designed to expose.
+Three estimators are implemented. The PID-error method reads the controller's steady-state torque command at a single joint while gravity compensation is selectively disabled, and converts that torque to a payload mass through a known geometric moment arm. The Lyapunov method leaves gravity compensation on, softens the controller into a multi-dimensional spring, lets the arm sag a few millimetres under the payload, and recovers the mass from the energy balance between spring storage and gravitational potential. The momentum observer integrates the joint-space dynamics through a generalized-momentum residual whose steady-state value is the external joint torque, and recovers the mass by projecting that residual onto the end-effector Jacobian. The three methods read different sensor channels (joint torque, joint position, and time-integrated momentum), so they fail in different ways. That is the property the case study is designed to expose.
 
 If you want the underlying maths and physics for each method, see:
 
 - [docs/PID_ERROR.md](docs/PID_ERROR.md) for the PID-error estimator
 - [docs/LYAPUNOV.md](docs/LYAPUNOV.md) for the Lyapunov (spring-sag) estimator
+- [docs/MOMENTUM_OBSERVER.md](docs/MOMENTUM_OBSERVER.md) for the momentum-observer estimator
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the layered system design
 
 ## Setup
@@ -36,21 +37,23 @@ The viewer should open with the UR5e on a pedestal, a conveyor in front of it, a
 
 ## Running the estimator verification sweep
 
-`scripts/verify_estimators.py` cycles through every combination of estimator and cube mass, prints a comparison table, and exits with a non-zero status if any trial classifies into the wrong bin. The script reuses a single MuJoCo environment across trials (no model reload), so the whole sweep runs in roughly two seconds.
+`scripts/verify_estimators.py` runs every combination of estimator and cube mass through the full FSM, prints a per-trial table of true mass against estimated mass, and finishes with a per-estimator summary of mean error, mean absolute error, and RMSE. The script reuses a single MuJoCo environment across trials so the whole sweep runs in roughly twenty-five seconds for the default 75-trial grid (three estimators times 25 geometrically-spaced masses from 10 g to 2.5 kg).
 
 ```bash
-# Default sweep: pid_error and lyapunov, masses 0.2 kg and 0.5 kg
+# Default sweep: all three estimators, 25 masses, 10 g to 2.5 kg
 python software/scripts/verify_estimators.py
 
 # Start with a clean calibration cache (recomputes baselines in-sim):
 python software/scripts/verify_estimators.py --clear-cache
 
-# Custom mass sweep, restricted to one estimator:
+# Custom mass list, restricted to one estimator:
 python software/scripts/verify_estimators.py --estimator lyapunov --masses 0.1,0.2,0.3,0.5,0.8
 
 # Watch the whole sweep in one continuous viewer window:
 python software/scripts/verify_estimators.py --viewer
 ```
+
+Trials with absolute error above a 25% threshold are tagged with a `high err` note in the table; the script still exits zero (the focus is on the response curve, not a pass/fail gate). Change `M_MIN`, `M_MAX`, or `N_MASSES` at the top of the script to widen, narrow, or densify the sweep.
 
 ## Running a specific mission
 
@@ -85,7 +88,7 @@ Unit tests sit in `software/tests/` and cover the estimator maths (no MuJoCo), t
 python -m pytest software/tests -q
 ```
 
-The whole suite finishes in around four seconds.
+The whole suite (around 75 tests) finishes in roughly six seconds.
 
 ## How to swap in a new estimator
 
@@ -107,7 +110,7 @@ software/
 │   ├── tick_loop.py           the single owner of mj_step plus the estimator dispatch
 │   ├── classify.py            threshold classifier
 │   ├── perception/            ground-truth backend now, CV backend later
-│   └── estimators/            base interface, registry, pid_error.py, lyapunov.py
+│   └── estimators/            base interface, registry, pid_error.py, lyapunov.py, momentum_observer.py
 ├── configs/                   default.yaml plus the autogenerated calibration.yaml
 ├── scripts/                   mission.py, verify_estimators.py
 └── tests/                     pytest suite

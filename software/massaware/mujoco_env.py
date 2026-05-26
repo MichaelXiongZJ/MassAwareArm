@@ -86,6 +86,19 @@ class MujocoEnv:
             [self.get_sensor(f"tau_{n.removesuffix('_joint')}")[0] for n in UR5E_JOINTS]
         )
 
+    def mass_matrix(self) -> np.ndarray:
+        """Return the 6x6 joint-space inertia matrix for the UR5e.
+
+        Expands MuJoCo's sparse `data.qM` storage to a full `nv x nv` matrix,
+        then slices the 6x6 block corresponding to the UR5e DOF addresses.
+        Returns a copy so a subsequent call (or another consumer of the same
+        expansion buffer) does not invalidate the caller's reference.
+        """
+        nv = self.model.nv
+        full = np.zeros((nv, nv))
+        mujoco.mj_fullM(self.model, full, self.data.qM)
+        return full[np.ix_(self._ur5e_dof_adr, self._ur5e_dof_adr)].copy()
+
     def set_body_mass(self, body_name: str, new_mass: float) -> float:
         """Mutate the mass of `body_name` at runtime.
 
