@@ -1,113 +1,143 @@
 # Momentum Observer Mass Estimator
 
-This note explains the momentum-observer method as implemented in `software/massaware/estimators/momentum_observer.py`. The structure of the derivation, the role of the gain $K_O$, the projection from joint-space residual to scalar mass, and the conditions under which the static-pose approximation in the code is acceptable are all covered below.
+This note explains the momentum-observer method as implemented in `software/massaware/estimators/momentum_observer.py`. The math is the main subject. The implementation gets one short section near the end. There is also an intuition section up top for readers with no robotics background.
 
-## 1. Setting up the residual
+## 1. Intuition
 
-Write the equations of motion of the arm with an unknown joint-space disturbance $\tau_{\text{ext}}$ produced by the payload:
+The two static estimators in this project, PID-error and Lyapunov, both wait for the arm to come to rest and then read off something about the rest state. The momentum observer takes a different angle. It watches how much momentum the arm has built up over time, compares that against how much momentum the gravity model and the controller's commands would have produced on their own, and attributes the discrepancy to an unmodelled load on the gripper.
 
-$$
-M(q)\,\ddot{q} + C(q,\dot{q})\,\dot{q} + g(q) \;=\; \tau \;+\; \tau_{\text{ext}}.
-$$
+A loose analogy. Imagine pushing a shopping cart along a flat aisle. You know how hard you are pushing. You know how much the cart should accelerate per unit push, because you know roughly how heavy an empty cart is. If you push for a few seconds and the cart accelerates less than expected, there must be something extra in the cart that you did not account for. The "extra" is the payload. The momentum observer formalises this idea for a robot arm: it computes how much momentum the arm should have built up given the commanded torques and the gravity model, compares that with the momentum it actually has, and the gap is the joint-space signature of the cube.
 
-Define the generalized momentum $p(t) = M(q)\,\dot{q}$. Differentiating and substituting the dynamics gives
+The non-obvious part is that this measurement does not require knowing the arm's acceleration. Acceleration is hard to compute cleanly from sensor data because differentiating velocity amplifies noise. By tracking momentum, which depends only on positions and velocities, the math stays in terms of clean signals throughout.
 
-$$
-\dot{p} \;=\; \dot{M}\,\dot{q} + M\,\ddot{q} \;=\; \dot{M}\,\dot{q} + \tau + \tau_{\text{ext}} - C\,\dot{q} - g.
-$$
+## 2. Setting up the residual
 
-The key identity, which carries the geometry of rigid-body dynamics, is $\dot{M} = C + C^{\top}$ (the matrix $\dot{M} - 2C$ is skew-symmetric for the standard choice of $C$). Substituting and simplifying:
+The equations of motion of the arm with an unknown payload contributing a joint-space disturbance $\tau_{\text{ext}}$ are
 
-$$
-\dot{p} \;=\; \tau + \tau_{\text{ext}} + C^{\top}\,\dot{q} - g.
-$$
+$$M(q) \, \ddot{q} \;+\; C(q, \dot{q}) \, \dot{q} \;+\; g(q) \;=\; \tau \;+\; \tau_{\text{ext}}.$$
 
-The observer's job is to estimate $\tau_{\text{ext}}$ given only $\tau$, $q$, $\dot{q}$, $M$, $C$, and $g$. The trick is to build a predicted momentum $\hat{p}$ whose dynamics mirror the real ones but with the unknown $\tau_{\text{ext}}$ replaced by a feedback signal $r$. Choose
+The terms, one at a time:
+- $q$, $\dot{q}$, $\ddot{q}$ are the six-component vectors of joint angle, velocity, and acceleration.
+- $M(q)$ is the joint-space mass matrix. It is the rotational analogue of mass for an articulated body, and it depends on the current pose because the moment of inertia about each joint axis changes as the geometry of the chain changes.
+- $C(q, \dot{q}) \dot{q}$ is the Coriolis and centrifugal term. It accounts for the fact that when several joints rotate at once, each one feels an apparent torque from the others.
+- $g(q)$ is the joint-space gravity torque. It is the torque the controller has to provide just to hold the arm in place against gravity.
+- $\tau$ is the torque the controller is actually commanding.
+- $\tau_{\text{ext}}$ is the unknown joint-space torque produced by the payload. The cube's mass is hidden inside this term.
 
-$$
-\dot{\hat{p}} \;=\; \tau + r + C^{\top}\,\dot{q} - g, \qquad \hat{p}(0) = p(0),
-$$
+Define the generalized momentum:
 
-and let
+$$p(t) \;=\; M(q(t)) \, \dot{q}(t).$$
 
-$$
-r(t) \;=\; K_O \bigl( p(t) - \hat{p}(t) \bigr).
-$$
+This is a six-vector quantity, one component per joint. Differentiating with respect to time and using the equations of motion to eliminate $\ddot{q}$:
 
-Differentiating $r$ and using the two expressions for $\dot{p}$ and $\dot{\hat{p}}$ kills every term except the disturbance and the feedback:
+$$\dot{p} \;=\; \dot{M} \dot{q} + M \ddot{q} \;=\; \dot{M} \dot{q} + \tau + \tau_{\text{ext}} - C \dot{q} - g.$$
 
-$$
-\dot{r} \;=\; K_O \bigl( \dot{p} - \dot{\hat{p}} \bigr) \;=\; K_O \bigl( \tau_{\text{ext}} - r \bigr).
-$$
+A central identity of rigid-body dynamics is that the matrix $\dot{M} - 2C$ is skew-symmetric, for the standard convention on how $C$ is constructed from $M$. This is equivalent to writing $\dot{M} = C + C^{\top}$. Substituting:
 
-This is the central result. The residual $r$ is a first-order low-pass filter on $\tau_{\text{ext}}$ with cutoff $K_O$. There is no algebraic relation that requires knowing $\dot{q}$ or the inertia matrix outside of forming $p$ and $\hat{p}$. There is no acceleration $\ddot{q}$ anywhere, which is the whole point of the construction: $\ddot{q}$ is noisy and would need to be differentiated from $\dot{q}$ if used directly.
+$$\dot{p} \;=\; \tau + \tau_{\text{ext}} + C^{\top} \dot{q} - g.$$
 
-## 2. The static-pose approximation
+The crucial feature of this expression is that the acceleration $\ddot{q}$ has disappeared. The right-hand side depends only on $q$, $\dot{q}$, the commanded torque $\tau$, and the model quantities $C$ and $g$. This is what makes the observer noise-tolerant: at no point does anyone have to differentiate a velocity signal.
 
-The clean derivation above requires the Coriolis-transpose product $C^{\top}\,\dot{q}$. MuJoCo does not expose $C$ directly. It does report $q_{\text{frc,bias}} = C\,\dot{q} + g$, which mixes the Coriolis term with gravity.
+The observer's job is to estimate $\tau_{\text{ext}}$ given everything else. The trick is to build a predicted momentum $\hat{p}$ whose dynamics mirror the real ones, with the unknown $\tau_{\text{ext}}$ replaced by a feedback signal $r$ that the observer constructs:
 
-During the WEIGH hold the arm has reached a settled equilibrium. The joint velocity $\dot{q}$ is on the order of a few millirad/s after settle, so $C\,\dot{q}$ is at least three orders of magnitude smaller than $g$ and effectively negligible. Under this approximation $C^{\top}\dot{q} \approx 0$ and $g \approx q_{\text{frc,bias}}$, which reduces the observer to
+$$\dot{\hat{p}} \;=\; \tau + r + C^{\top} \dot{q} - g, \qquad \hat{p}(0) = p(0).$$
 
-$$
-\dot{\hat{p}} \;=\; \tau + r - q_{\text{frc,bias}}, \qquad r = K_O\,(p - \hat{p}).
-$$
+The feedback signal is just a constant gain times the gap between true and predicted momentum:
 
-This is the form implemented in `update()`. The static-pose approximation is what makes the implementation simple. It is also what limits the observer to weighing at rest, and is the first thing to revisit if a later phase wants to weigh during the lift trajectory. In that case the full $C^{\top}\dot{q}$ has to be computed, either by extracting $C$ via a finite difference on the bias term or by switching to a formulation that does not need $C$ at all.
+$$r(t) \;=\; K_O \bigl( p(t) - \hat{p}(t) \bigr).$$
 
-## 3. Discrete-time recursion
+Subtracting the equation for $\dot{\hat{p}}$ from the equation for $\dot{p}$ kills every term except the disturbance and the feedback:
 
-Forward Euler on $\hat{p}$, followed by an algebraic evaluation of $r$, gives the loop in code:
+$$\dot{p} \;-\; \dot{\hat{p}} \;=\; \tau_{\text{ext}} - r.$$
 
-$$
-\hat{p}_{k+1} \;=\; \hat{p}_k + \Delta t\,\bigl(\tau_k + r_k - q_{\text{frc,bias},k}\bigr),
-\qquad
-r_{k+1} \;=\; K_O\,\bigl(p_{k+1} - \hat{p}_{k+1}\bigr).
-$$
+Differentiating $r$ in time and substituting:
 
-Seeds: $\hat{p}_0 = p_0$ (so the observer starts with zero prediction error) and $r_0 = 0$.
+$$\dot{r} \;=\; K_O \bigl( \dot{p} - \dot{\hat{p}} \bigr) \;=\; K_O \bigl( \tau_{\text{ext}} - r \bigr).$$
 
-With the project's default $\Delta t = 2$ ms and $K_O = 50$ s$^{-1}$, the dimensionless step $K_O\Delta t = 0.1$. Forward Euler stability for a first-order low-pass requires $K_O\Delta t < 2$, which leaves a generous margin. The continuous time constant of the loop is $1/K_O = 20$ ms. After roughly three time constants, about 60 ms, the residual has reached $1 - e^{-3} \approx 95\%$ of its steady-state value. Five time constants, 100 ms, brings it within $1\%$. The default `burn_in_s = 0.5` accordingly throws away the first 250 time constants of transient, which is more than enough.
+This is the central result. The residual $r$ is a first-order low-pass filter on the unknown disturbance with cutoff $K_O$. For a constant external torque, which is what a static payload produces, $r$ converges exponentially to $\tau_{\text{ext}}$ with time constant $1/K_O$. After three time constants $r$ is within 5% of the true disturbance; after five, within 1%.
 
-## 4. From joint-space residual to scalar mass
+The construction is sometimes called the De Luca observer after Alessandro De Luca, who developed this form. It has been the workhorse of disturbance estimation in robotics for two decades precisely because it never asks for $\ddot{q}$.
 
-The converged residual $\hat{r}$ is an estimate of the joint-space disturbance produced by the payload. For a point mass attached at the end-effector, the only Cartesian wrench is the gravity force $F_{\text{ext}} = -m g \hat{z}$, and the joint-space pull-back through the linear Jacobian $J_v(q)$ is
+## 3. The static-pose approximation
 
-$$
-\tau_{\text{ext}} \;=\; J_v^{\top}(q)\,F_{\text{ext}} \;=\; -m\,g\,J_{v,z}^{\top}(q),
-$$
+The clean derivation above requires the Coriolis-transpose product $C^{\top} \dot{q}$. The MuJoCo simulator does not expose the matrix $C$ directly. It does report the combined quantity `qfrc_bias`, which equals $C \dot{q} + g$. The Coriolis term and the gravity term are mixed together in this single vector.
 
-where $J_{v,z}$ is the third row of $J_v$, namely the vector of partial derivatives $\partial z_{\text{EE}}/\partial q_j$. The converged observer therefore satisfies
+During the weigh hold, the arm has reached a settled equilibrium. The joint velocities are on the order of a few millirad/s after settling, so the Coriolis term $C \dot{q}$ is at least three orders of magnitude smaller than the gravity term $g$, and is effectively negligible. Under this approximation,
 
-$$
-\hat{r} \;\approx\; -m\,g\,J_{v,z}^{\top}(q_{\text{weigh}}).
-$$
+$$C^{\top} \dot{q} \;\approx\; 0, \qquad g \;\approx\; \text{qfrc\_bias},$$
 
-This is six equations in one unknown. The natural extraction is a least-squares projection of $\hat{r}$ onto the known direction $-g\,J_{v,z}^{\top}$. Subtracting the empty-arm baseline $\hat{r}_{\text{empty}}$ to cancel constant model error and any disturbance bias, the closed form is
+and the observer collapses to
 
-$$
-\boxed{\;\hat{m} \;=\; -\frac{\bigl\langle \hat{r} - \hat{r}_{\text{empty}},\; J_{v,z} \bigr\rangle}{g\,\|J_{v,z}\|^2}.\;}
-$$
+$$\dot{\hat{p}} \;=\; \tau + r - \text{qfrc\_bias}, \qquad r \;=\; K_O \, (p - \hat{p}).$$
 
-Per-tick sample scatter in $\hat{r}$ propagates through the projection to give an uncertainty estimate $\sigma_{\hat{m}}$, which the code reports alongside the point estimate.
+This is the form that lives in the code. The static-pose approximation is what makes the implementation simple. It is also what restricts the observer to weighing at rest. If a future phase wants to weigh during the lift trajectory, the full $C^{\top} \dot{q}$ term must be reinstated, which requires either extracting $C$ via a finite difference on `qfrc_bias` or reformulating the observer in a way that does not need $C$ explicitly.
 
-## 5. Why calibration is still required
+## 4. Discrete-time recursion
 
-Although the observer construction is "controller-agnostic" in the sense that it does not depend on the PD gains, in practice the static-pose approximation leaves residual error in the empty arm that does not vanish. Three sources matter:
+In code, time advances in discrete steps of length $\Delta t$. Applying forward Euler integration to $\hat{p}$, followed by the algebraic evaluation of $r$:
 
-1. **Model error in $g(q)$.** MuJoCo's `qfrc_bias` is computed from the model's inertial parameters, which approximate the real link masses and centers of mass. Any mismatch shows up as a constant bias in $\hat{r}$ at the weigh pose.
-2. **Discretization and integrator drift.** The Forward Euler step introduces $O(\Delta t)$ error in $\hat{p}$ that does not average to zero.
-3. **Residual $C\,\dot{q}$.** Even after settling, the joint velocity is not exactly zero. The dropped Coriolis term contributes a tiny offset.
+$$\hat{p}_{k+1} \;=\; \hat{p}_k + \Delta t \, \bigl( \tau_k + r_k - \text{qfrc\_bias}_k \bigr),$$
 
-The empty-arm calibration captures all three of these in $\hat{r}_{\text{empty}}$ and subtracts them at estimate time. The result is a clean separation between the systematic offset that the observer cannot avoid and the payload-induced part that it is supposed to measure.
+$$r_{k+1} \;=\; K_O \, \bigl( p_{k+1} - \hat{p}_{k+1} \bigr).$$
 
-## 6. Sensitivities and caveats
+The seeds are $\hat{p}_0 = p_0$ and $r_0 = 0$. Starting with $\hat{p}$ exactly equal to $p$ means the prediction error is zero at the first sample, so the residual builds up only as the dynamics evolve.
+
+With the project's default time step $\Delta t = 2$ ms and observer gain $K_O = 50$ s$^{-1}$, the dimensionless step is $K_O \Delta t = 0.1$. Forward-Euler stability for a first-order low-pass requires this dimensionless step to stay below 2, so the current choice has a generous margin. The continuous time constant of the loop is $1/K_O = 20$ ms. After three time constants (60 ms), the residual has reached about 95% of its steady-state value. After five (100 ms), 99%. The default burn-in window of 500 ms therefore discards roughly 25 time constants of transient before averaging starts, far more than enough.
+
+## 5. From the joint-space residual to a scalar mass
+
+The converged residual $\hat{r}$ is an estimate of the joint-space disturbance produced by the payload. For a point mass at the end-effector, the only Cartesian force exerted on the arm by the payload is gravity acting on the cube:
+
+$$F_{\text{ext}} \;=\; -m g \hat{z},$$
+
+where $\hat{z}$ is the world vertical unit vector. The joint-space torque corresponding to this Cartesian force is the pull-back through the linear Jacobian:
+
+$$\tau_{\text{ext}} \;=\; J_v^{\top}(q) \, F_{\text{ext}} \;=\; -m g \, J_{v,z}(q),$$
+
+where $J_{v,z}(q)$ is the third row of the linear Jacobian, that is, the six-vector of partial derivatives of end-effector height with respect to each joint angle:
+
+$$J_{v,z} \;=\; \left( \dfrac{\partial z_{\text{ee}}}{\partial q_1}, \dfrac{\partial z_{\text{ee}}}{\partial q_2}, \ldots, \dfrac{\partial z_{\text{ee}}}{\partial q_6} \right).$$
+
+In words, each component of $J_{v,z}$ tells you how much the end-effector rises or falls per unit rotation of the corresponding joint. The converged observer therefore approximately satisfies
+
+$$\hat{r} \;\approx\; -m g \, J_{v,z}(q_{\text{weigh}}).$$
+
+This is six equations in one unknown. The natural way to extract $m$ is by least squares: project $\hat{r}$ onto the known direction $-g J_{v,z}$. After subtracting the empty-arm baseline $\hat{r}_{\text{empty}}$ to cancel any constant model error and any small disturbance bias, the closed form is
+
+$$\boxed{\; \hat{m} \;=\; -\dfrac{\bigl\langle \hat{r} - \hat{r}_{\text{empty}}, \; J_{v,z} \bigr\rangle}{g \, \|J_{v,z}\|^2}. \;}$$
+
+The angle brackets denote the dot product, summed over the six joint components. The denominator is just the squared norm of $J_{v,z}$, a single scalar.
+
+The per-tick scatter in $\hat{r}$ propagates through the projection to yield an uncertainty estimate $\sigma_{\hat{m}}$, which the code reports alongside the point estimate.
+
+## 6. Why calibration is still required
+
+The momentum observer is often described as "controller-agnostic" because it does not depend on the PD gains, on the integral state, or on any other controller-side knob. That is true of the structural derivation, but in practice the static-pose approximation leaves a residual error in the empty arm that does not vanish on its own. Three sources matter:
+
+1. **Model error in $g(q)$.** The gravity bias `qfrc_bias` is computed from the model's inertial parameters, which approximate the real link masses and centres of mass. Any mismatch shows up as a constant additive offset in $\hat{r}$ at the weigh pose.
+
+2. **Discretisation drift.** Forward Euler on $\hat{p}$ introduces an $O(\Delta t)$ error per step that does not average to zero over time. With $\Delta t = 2$ ms and a settled residual, the cumulative effect is small but non-zero, and it appears as a constant bias.
+
+3. **Residual Coriolis term.** Even after settling, the joint velocities are not exactly zero. The dropped $C \dot{q}$ term contributes a small offset to the bias.
+
+The empty-arm calibration captures all three of these in a single vector $\hat{r}_{\text{empty}}$ and subtracts them at estimate time. The result is a clean separation between the systematic offset the observer cannot avoid and the payload-induced part it is supposed to measure.
+
+## 7. Implementation notes
+
+The estimator is about 200 lines of Python in `software/massaware/estimators/momentum_observer.py`. Unlike the other two estimators, it carries internal state across ticks: the predicted momentum $\hat{p}$ and the residual $r$. `reset()` clears this state at the start of each weigh hold. `update()` advances the discrete recursion by one tick and, after the burn-in window has elapsed, appends one sample of $(\hat{r}, J_{v,z})$ to the buffer. `estimate()` averages the buffer and applies the projection above.
+
+The observation interface gives the estimator everything it needs each tick: $q$, $\dot{q}$, the commanded torque, the gravity bias, the mass matrix $M$, and the Jacobian at the end-effector. Forming $p$ is a single matrix-vector product. The projection step at the end requires no extra simulation calls.
+
+Unlike PID-error and Lyapunov, this estimator does not need any controller overrides. The base PID is fine. `gravity_comp_mask()` returns all ones (full gravity compensation everywhere), and `controller_overrides()` returns an empty dict. The cube simply hangs in the gripper while the base controller holds the weigh pose, and the observer integrates the dynamics in parallel.
+
+## 8. Sensitivities and caveats
 
 Three things deserve attention.
 
-**Choice of $K_O$.** Smaller $K_O$ gives slower convergence but more aggressive low-pass filtering, which suppresses tick-by-tick noise in $\hat{r}$. Larger $K_O$ converges within a handful of milliseconds but exposes the projection to high-frequency content in $p$ and $\hat{p}$. The default of $50$ s$^{-1}$ is a compromise that produces a clean residual within the project's 1 s weigh hold. A future tuning pass might select per-joint gains: the shoulder lift and the elbow carry most of the signal here, so they could afford a smaller $K_O$ than the wrist joints if noise becomes the dominant error source.
+**Choice of $K_O$.** A smaller $K_O$ gives slower convergence but more aggressive low-pass filtering, which suppresses tick-by-tick noise in $\hat{r}$. A larger $K_O$ converges within a handful of milliseconds but exposes the projection to high-frequency content in $p$ and $\hat{p}$. The default of 50 s$^{-1}$ is a compromise that produces a clean residual within the project's one-second weigh hold. A future tuning pass might select per-joint gains. The shoulder lift and the elbow carry most of the signal at the current weigh pose, so they could afford a smaller $K_O$ than the wrist joints if wrist-channel noise ever became the dominant error source.
 
-**Degenerate poses.** The projection denominator $\|J_{v,z}\|^2$ is the sum of squared partials of EE height with respect to each joint angle. If the weigh pose happens to be such that vertical motion of the end-effector is impossible for any single-joint perturbation, this denominator collapses and the estimator is structurally blind. The current weigh pose has $\|J_{v,z}\|^2$ of order $0.4$, well away from the degenerate region. A guard in the code returns $\hat{m} = 0$ with $\sigma = \infty$ if the denominator ever drops below numerical tolerance.
+**Degenerate poses.** The projection denominator $\|J_{v,z}\|^2$ is the sum of the squared partial derivatives of end-effector height with respect to each joint angle. If the weigh pose were chosen so that no single-joint perturbation moved the end-effector vertically (for example, with the arm fully extended along a horizontal line), this denominator would collapse and the estimator would be structurally blind to the payload. The current weigh pose has $\|J_{v,z}\|^2$ on the order of 0.4, well away from the degenerate region. The code guards against the edge case anyway: if the denominator drops below numerical tolerance, the estimator returns $\hat{m} = 0$ with $\sigma = \infty$ rather than dividing by something close to zero.
 
-**Quasi-static assumption.** As noted in Section 2, the observer in this project's static form is meaningful only when the arm has settled. It is not the right tool for an arm in motion. The De Luca form does support mid-trajectory weighing in principle, but doing so requires the full $C^{\top}\dot{q}$ term and an awareness of which time windows along a trajectory have well-conditioned Jacobians. That is a stretch goal, not a property of the current implementation.
+**Quasi-static assumption.** As noted in section 3, the observer in its current implementation is only meaningful when the arm has settled to rest. It is not the right tool for an arm in motion. The full De Luca form does support mid-trajectory weighing in principle, but this requires the full $C^{\top} \dot{q}$ term and a careful analysis of which time windows along the trajectory have well-conditioned Jacobians. That is a stretch goal, not a property of the current implementation.
 
-The momentum observer rounds out the set of estimators by carrying information that the static methods cannot: the time profile of the residual is itself a diagnostic that the other two methods do not produce. Even when all three give compatible mass estimates, the convergence profile of $\hat{r}(t)$ during the WEIGH hold gives an independent check on the observer's internal consistency.
+The momentum observer's distinctive contribution to the case-study comparison is that the time profile of $\hat{r}(t)$ is itself a diagnostic that the other two methods do not produce. Even when all three estimators give compatible mass estimates, watching the residual converge during the weigh hold provides an independent check on the observer's internal consistency. The static methods, which only read the final equilibrium, cannot offer the same.
