@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import sys
 import time
 from pathlib import Path
@@ -188,6 +189,19 @@ def main() -> int:
         print(f"{est_name:<18} {mean_err:>+9.1f}% {mean_abs:>11.1f}% {rmse:>9.1f}%")
 
     print(f"\nsweep took {elapsed:.1f} s over {len(rows)} trials")
+
+    # ── CSV output ────────────────────────────────────────────────────
+    results_dir = Path(__file__).resolve().parents[2] / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+    csv_path = results_dir / f"sweep_{stamp}.csv"
+    with open(csv_path, "w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["estimator", "true_mass", "m_hat", "sigma", "err_pct"])
+        for r in rows:
+            sigma = r["sigma"] if r["sigma"] == r["sigma"] else ""
+            writer.writerow([r["estimator"], r["mass"], r["m_hat"], sigma, f"{r['err_pct']:.4f}"])
+    print(f"wrote {csv_path.relative_to(results_dir.parent)} ({len(rows)} rows)")
     return 0
 
 

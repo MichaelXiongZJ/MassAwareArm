@@ -53,6 +53,8 @@ python software/scripts/verify_estimators.py --estimator lyapunov --masses 0.1,0
 python software/scripts/verify_estimators.py --viewer
 ```
 
+Every run also writes the per-trial table to a timestamped CSV under `results/` at the repo root. The script prints the path on exit; the folder is gitignored so logs from local sweeps stay out of version control.
+
 Trials with absolute error above a 25% threshold are tagged with a `high err` note in the table; the script still exits zero (the focus is on the response curve, not a pass/fail gate). Change `M_MIN`, `M_MAX`, or `N_MASSES` at the top of the script to widen, narrow, or densify the sweep.
 
 ## Running a specific mission
