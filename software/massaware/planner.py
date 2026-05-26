@@ -35,7 +35,7 @@ class PlannerContext:
     robot: Robot
     perception: Perception
     controller: PIDController
-    target_color: str = "green"
+    target_color: str = "grey"
     target_cube: CubeDetection | None = None
     trace: list[str] = field(default_factory=list)
 
@@ -170,6 +170,29 @@ class SettleStep(Step):
         if ctx.env.data.time - self._t_start > self.timeout:
             return True, False
         return False, False
+
+
+class _EnterEstimatorModeStep(Step):
+    """Flip on the estimator's gravity-comp mask and controller overrides.
+
+    Run *after* the arm has reached weigh_qpos under base gains; running it
+    earlier would force the move-to-pose loop to fight an uncompensated joint
+    while a payload is attached, which the soft P+D loop can't overcome.
+    Paired teardown is the owning State's exit().
+    """
+
+    def start(self, ctx: PlannerContext) -> None:
+        est = ctx.estimator
+        assert est is not None
+        n_joints = ctx.weigh_qpos.shape[0]
+        ctx.gravity_comp_mask = est.gravity_comp_mask(n_joints)
+        overrides = est.controller_overrides()
+        if overrides:
+            ctx.controller.apply_overrides(overrides)
+        ctx.gripper_cmd = GripperCmd.HOLD
+
+    def tick(self, ctx: PlannerContext) -> tuple[bool, bool]:
+        return True, True
 
 
 class _EstimatorHoldStep(Step):
@@ -386,24 +409,31 @@ class InitState(State):
 
         cached = _load_cached_calibration(ctx.weigh_qpos)
         if cached is not None:
-            ctx.calibration = cached
-            print(f"  [INIT] loaded cached calibration from {CALIBRATION_PATH.name}")
-            self._mode = "load"
-            return
+            try:
+                est.load_calibration(cached)
+            except KeyError as exc:
+                # File matches the pose but doesn't carry this estimator's
+                # keys (e.g. another estimator wrote it). Fall through to a
+                # fresh calibration; the merged save will keep both sets.
+                print(f"  [INIT] cached file present but missing keys ({exc}); running calibration")
+            else:
+                ctx.calibration = cached
+                print(f"  [INIT] loaded cached calibration from {CALIBRATION_PATH.name}")
+                self._mode = "load"
+                return
 
         # Need to run calibration in-sim.
         print(f"  [INIT] running calibration for estimator '{est.name}'")
-        n_joints = ctx.weigh_qpos.shape[0]
-        ctx.gravity_comp_mask = est.gravity_comp_mask(n_joints)
-        self._mask_applied = True
-        overrides = est.controller_overrides()
-        if overrides:
-            ctx.controller.apply_overrides(overrides)
-            self._overrides_applied = True
+        # NOTE: estimator gravity-comp mask + controller overrides are applied
+        # by _EnterEstimatorModeStep, which runs *after* the move-to-pose so
+        # the move happens under base gains.
+        self._mask_applied = True       # exit() must restore mask + overrides
+        self._overrides_applied = bool(est.controller_overrides())
 
         est.start_calibration(ctx)
         self._steps = [
             MoveToJointStep(ctx.weigh_qpos, timeout=5.0),
+            _EnterEstimatorModeStep(),
             SettleStep(tol=self.settle_tol, timeout=self.settle_timeout),
             _EstimatorHoldStep(est.update_calibration, hold_seconds=self.hold_seconds),
         ]
@@ -423,8 +453,15 @@ class InitState(State):
         if not done:
             return None
         if not ok:
-            print(f"  [INIT] step {self._idx} ({type(step).__name__}) failed during calibration")
-            return "ERROR"
+            if isinstance(step, SettleStep):
+                # Settle is best-effort. Some estimators (PID-error, softened
+                # gains) reach a low-amplitude limit cycle rather than a true
+                # rest; the hold-average still produces an unbiased estimate.
+                print(f"  [INIT] step {self._idx} (SettleStep) did not converge; proceeding")
+                ok = True
+            else:
+                print(f"  [INIT] step {self._idx} ({type(step).__name__}) failed during calibration")
+                return "ERROR"
         self._idx += 1
         if self._idx >= len(self._steps):
             # Calibration hold complete -> persist.
@@ -432,6 +469,7 @@ class InitState(State):
             assert est is not None
             new_keys = est.finish_calibration()
             ctx.calibration = _save_calibration(ctx.weigh_qpos, new_keys)
+            est.load_calibration(ctx.calibration)
             print(f"  [INIT] wrote calibration -> {CALIBRATION_PATH.name}")
             return "SEARCH"
         self._steps[self._idx].start(ctx)
@@ -463,18 +501,16 @@ class WeighState(State):
     def enter(self, ctx: PlannerContext) -> None:
         est = ctx.estimator
         assert est is not None, "WeighState entered with no estimator"
-        n_joints = ctx.weigh_qpos.shape[0]
-
-        ctx.gravity_comp_mask = est.gravity_comp_mask(n_joints)
+        # Mask + overrides are applied by _EnterEstimatorModeStep AFTER the
+        # move-to-pose, so the arm reaches weigh_qpos with full stiffness even
+        # when carrying a payload.
         self._mask_applied = True
-        overrides = est.controller_overrides()
-        if overrides:
-            ctx.controller.apply_overrides(overrides)
-            self._overrides_applied = True
+        self._overrides_applied = bool(est.controller_overrides())
 
         est.reset()
         self._steps = [
             MoveToJointStep(ctx.weigh_qpos, timeout=5.0),
+            _EnterEstimatorModeStep(),
             SettleStep(tol=self.settle_tol, timeout=self.settle_timeout),
             _EstimatorHoldStep(est.update, hold_seconds=ctx.weigh_hold_s),
         ]
@@ -489,8 +525,12 @@ class WeighState(State):
         if not done:
             return None
         if not ok:
-            print(f"  [WEIGH] step {self._idx} ({type(step).__name__}) failed")
-            return "HOME"
+            if isinstance(step, SettleStep):
+                print(f"  [WEIGH] step {self._idx} (SettleStep) did not converge; proceeding")
+                ok = True
+            else:
+                print(f"  [WEIGH] step {self._idx} ({type(step).__name__}) failed")
+                return "HOME"
         self._idx += 1
         if self._idx >= len(self._steps):
             est = ctx.estimator

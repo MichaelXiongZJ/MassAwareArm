@@ -44,6 +44,7 @@ class Gripper:
 def _build_obs(env: MujocoEnv, robot: "Robot", q_ref: np.ndarray, tau_cmd: np.ndarray) -> EstimatorObs:
     """Assemble an EstimatorObs from current sim state."""
     q = env.get_arm_qpos()
+    ee_xyz, _ = env.ee_pose()
     return EstimatorObs(
         t=float(env.data.time),
         q=q,
@@ -53,6 +54,7 @@ def _build_obs(env: MujocoEnv, robot: "Robot", q_ref: np.ndarray, tau_cmd: np.nd
         qfrc_bias=env.qfrc_bias,
         jacobian_ee=robot.jacobian_ee(q),
         q_ref=np.asarray(q_ref, dtype=float).copy(),
+        ee_xyz=ee_xyz,
     )
 
 

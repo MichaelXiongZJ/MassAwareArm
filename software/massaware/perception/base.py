@@ -16,8 +16,8 @@ import numpy as np
 
 @dataclass
 class CubeDetection:
-    name: str          # MuJoCo body name, e.g. "green_cube"
-    color: str         # "green" | "blue" | "red"
+    name: str          # MuJoCo body name (e.g. "cube")
+    color: str         # nominal color label, used by SearchState's target filter
     xyz: np.ndarray    # world position, shape (3,)
     quat: np.ndarray   # world orientation, wxyz, shape (4,)
 

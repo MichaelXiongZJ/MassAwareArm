@@ -23,6 +23,7 @@ class EstimatorObs:
     qfrc_bias: np.ndarray
     jacobian_ee: np.ndarray   # 3x6 linear Jacobian at the EE site
     q_ref: np.ndarray
+    ee_xyz: np.ndarray        # world-frame EE site position
 
 
 @dataclass
@@ -96,7 +97,21 @@ class Estimator(ABC):
         )
 
     def finish_calibration(self) -> dict:
-        """Return a dict of calibration keys to merge into configs/calibration.yaml."""
+        """Return a dict of calibration keys to merge into configs/calibration.yaml.
+
+        Called by InitState after the calibration hold completes; the same dict
+        is then handed back via `load_calibration()` so the cached-load path
+        and the fresh-calibration path produce identical estimator state.
+        """
         raise NotImplementedError(
             f"{self.name}.requires_calibration=True but finish_calibration() is not implemented"
+        )
+
+    def load_calibration(self, data: dict) -> None:
+        """Restore calibration state from a cached dict (configs/calibration.yaml).
+
+        Default raises; estimators with requires_calibration=True must implement.
+        """
+        raise NotImplementedError(
+            f"{self.name}.requires_calibration=True but load_calibration() is not implemented"
         )

@@ -1,14 +1,25 @@
 poses:
   home_qpos: [0, -90, -90, -90, 90, 0]   # degrees, converted at load time
-  weigh_qpos: [0, -90, -90, -90, 90, 0]  # matches home_qpos
+  weigh_qpos: [0, -90, -90, -90, 90, 0]  # same pose; elbow moment arm ~0.49 m
   light_bin_drop: [0.0, 0.60, 0.55]      # metres, world frame
   heavy_bin_drop: [0.0, -0.60, 0.55]     # metres, world frame
 
+controller:
+  # Joint-space PID gains. UR5e baseline (hand-tuned).
+  kp: [2000, 2000, 2000, 500, 500, 500]
+  ki: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  kd: [400, 400, 400, 100, 100, 100]
+
+weigh:
+  hold_seconds: 1.0                      # samples accumulated during WEIGH
+
 estimator:
-  name: "pid_error"                      # swappable: pid_error | inverse_dynamics | momentum_observer
+  name: lyapunov                         # null | pid_error | lyapunov | ...
   pid_error:
-    measurement_joints: [1]              # shoulder_lift
-    moment_arm: 0.5                      # TBD — measured during Sub-phase D
+    measurement_joint: 2                 # elbow (scalar)
+    moment_arm: 0.492                    # m, derived via FK at weigh_qpos (see PINNED_ISSUES.md P1)
+  lyapunov:
+    # No estimator-specific config; uses controller.kp + calibration data.
 
 classifier:
   mass_threshold: 0.35                   # kg — boundary between "light" and "heavy"

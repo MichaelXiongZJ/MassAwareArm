@@ -80,37 +80,17 @@
             material="belt_side"/>
     </body>
 
-    <!-- Light package: green cube -->
-    <body name="green_cube" pos="0.55 -0.36 0.405">
+    <!-- Single payload cube. Mass is mutated at runtime by MujocoEnv.set_cube_mass()
+         for each trial in the estimator sweep; the XML value below is just the
+         default if mass-swap is never called. -->
+    <body name="cube" pos="0.55 0.00 0.405">
       <freejoint/>
-      <geom name="green_cube_geom"
-            type="box"
-            size="0.03 0.03 0.03"
-            mass="0.2"
-            friction="1.2 0.01 0.001"
-            rgba="0 1 0 1"/>
-    </body>
-
-    <!-- Medium package: blue cube -->
-    <body name="blue_cube" pos="0.55 0.00 0.405">
-      <freejoint/>
-      <geom name="blue_cube_geom"
+      <geom name="cube_geom"
             type="box"
             size="0.03 0.03 0.03"
             mass="0.5"
-            friction="1.2 0.01 0.001"
-            rgba="0 0.2 1 1"/>
-    </body>
-
-    <!-- Heavy package: red cube -->
-    <body name="red_cube" pos="0.55 0.36 0.405">
-      <freejoint/>
-      <geom name="red_cube_geom"
-            type="box"
-            size="0.03 0.03 0.03"
-            mass="1.0"
-            friction="1.2 0.01 0.001"
-            rgba="1 0 0 1"/>
+            friction="3.0 0.01 0.001"
+            rgba="0.5 0.5 0.5 1"/>
     </body>
 
     <!-- Sorting targets: arm-left for light packages, arm-right for heavy packages -->

@@ -5,10 +5,10 @@ from __future__ import annotations
 from massaware.mujoco_env import MujocoEnv
 from massaware.perception.base import CubeDetection, Perception
 
+# Single payload cube. The color attribute is nominal — it labels the cube
+# for the (now mass-only) target filter but does not affect physics.
 CUBES: tuple[tuple[str, str], ...] = (
-    ("green_cube", "green"),
-    ("blue_cube",  "blue"),
-    ("red_cube",   "red"),
+    ("cube", "grey"),
 )
 
 
