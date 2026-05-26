@@ -38,9 +38,10 @@ from scripts.mission import build
 # Multiplicative steps give automatic density at the light end (where the
 # sag-based method's noise floor lives) without losing coverage of the heavy
 # edge. The ratio between successive trials is about 1.26x.
-M_MIN, M_MAX, N_MASSES = 0.01, 2.5, 25
+M_MIN, M_MAX, N_MASSES = 0.01, 3, 20
 DEFAULT_MASSES: list[float] = [
-    round(float(m), 4) for m in np.geomspace(M_MIN, M_MAX, num=N_MASSES)
+    round(float(m), 4) for m in np.geomspace(M_MIN, M_MAX, num=N_MASSES) # log
+    # round(float(m), 4) for m in np.linspace(M_MIN, M_MAX, num=N_MASSES) # linear
 ]
 DEFAULT_ESTIMATORS: list[str] = ["pid_error", "lyapunov", "momentum_observer"]
 
@@ -116,7 +117,7 @@ def main() -> int:
                     help="run a single estimator instead of all known")
     ap.add_argument("--masses", default=None,
                     help="comma-separated list of cube masses (kg); "
-                         "default is 0.2,0.5")
+                         "default is 25 geometrically-spaced masses from 10g to 2.5kg")
     ap.add_argument("--clear-cache", action="store_true",
                     help="delete configs/calibration.yaml before starting")
     ap.add_argument("--viewer", action="store_true",
