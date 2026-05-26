@@ -32,7 +32,7 @@ Companion to [ARCHITECTURE.md](ARCHITECTURE.md). Build order is **bottom-up to f
    - `fk(q)`, `jacobian_ee(q)` — wrappers around `mj_kinematics` / `mj_jacSite`. Operate on the full 6-DOF joint vector.
    - `ik(target_xyz, q_seed)` — numerical IK (damped least-squares). With 6 DOF and a 3-D position target the IK is underdetermined; seed from `HOME_QPOS` (or current pose) to bias toward consistent gripper orientation. Clip per-iteration step and wrap the final result to the seed's 2π branch to avoid joint-wrap-around solutions.
 
-**Done check:** `scripts/run.py` (stub) loads scene, steps 1000 ticks, prints final EE position; gravity makes the arm sag if actuators are disabled.
+**Done check:** `scripts/mission.py` (stub) loads scene, steps 1000 ticks, prints final EE position; gravity makes the arm sag if actuators are disabled.
 
 ---
 
@@ -66,7 +66,7 @@ Companion to [ARCHITECTURE.md](ARCHITECTURE.md). Build order is **bottom-up to f
 3. Implement the FSM in the same file:
    - States: `SEARCH`, `GRASP`, `PLACE`, `HOME` (skip WEIGH/CLASSIFY for now).
    - Hard-code `PLACE` to always go to the light bin.
-4. Write `scripts/run.py` to instantiate everything and tick the FSM.
+4. Write `scripts/mission.py` to instantiate everything and tick the FSM.
 
 **Done check:** run it, watch one cube travel `home → cube → light_bin → home`. Print the state trace.
 
@@ -180,7 +180,7 @@ Estimated total: **2–3 weeks** of focused work for phases 0–7.
 
 ## Daily Rhythm Recommendations
 
-- **Always run `scripts/run.py` end-to-end before committing.** If the pipeline breaks at any phase, fix it before adding more.
+- **Always run `scripts/mission.py` and `scripts/verify_estimators.py` end-to-end before committing.** If the pipeline breaks at any phase, fix it before adding more.
 - **Hard-code first, configure later.** Move values into `configs/default.yaml` only after the hard-coded version works.
 - **Log everything from Phase 4 onward.** The case-study plot only needs the data you've already been logging — don't bolt logging on at the end.
 - **One estimator file per PR.** Reviewers can confirm the interface holds.

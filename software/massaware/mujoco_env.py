@@ -85,3 +85,30 @@ class MujocoEnv:
         return np.array(
             [self.get_sensor(f"tau_{n.removesuffix('_joint')}")[0] for n in UR5E_JOINTS]
         )
+
+    def set_body_mass(self, body_name: str, new_mass: float) -> float:
+        """Mutate the mass of `body_name` at runtime.
+
+        Scales the body inertia by the same factor (preserves shape, just
+        rescales magnitude — correct for primitive geoms whose inertia tensor
+        is linear in density). Refreshes MuJoCo's cached constants so the
+        change takes effect on the next `mj_step`.
+
+        Returns the previous mass for traceability.
+
+        Typical usage between trials::
+
+            old = env.set_body_mass("cube", 0.3)
+            env.reset(arm_qpos=home)
+        """
+        if new_mass <= 0.0:
+            raise ValueError(f"new_mass must be positive (got {new_mass})")
+        bid = self.model.body(body_name).id
+        old_mass = float(self.model.body_mass[bid])
+        if old_mass <= 0.0:
+            raise ValueError(f"body '{body_name}' has non-positive mass {old_mass}")
+        scale = new_mass / old_mass
+        self.model.body_mass[bid] = float(new_mass)
+        self.model.body_inertia[bid] = self.model.body_inertia[bid] * scale
+        mujoco.mj_setConst(self.model, self.data)
+        return old_mass

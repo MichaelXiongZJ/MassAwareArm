@@ -154,10 +154,13 @@ software/
 │   └── default.yaml          # poses, threshold, estimator name and settings
 │
 └── scripts/
-    ├── run.py                # one full pipeline run
-    ├── calibrate.py          # capture empty-arm reference torques
-    └── compare_estimators.py # case-study driver, produces slide-8 plot
+    ├── mission.py            # one full pipeline run (single mission)
+    └── verify_estimators.py  # sweep (estimator × mass) and assert correct bin
 ```
+
+> Calibration is run automatically inside `InitState` (no standalone script);
+> see [PHASE5_PLAN.md](PHASE5_PLAN.md). The Phase-7 case-study plot driver
+> (`compare_estimators.py`) is not yet implemented.
 
 Adding a new estimator = drop one file in `estimators/` and register it. Adding a new perception backend = drop one file in `perception/`. Nothing else moves.
 
