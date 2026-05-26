@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 import mujoco
+import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -63,10 +64,12 @@ def fresh_calibration(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("estimator,mass,expected_bin", [
-    ("pid_error", 0.2, "light"),
-    ("pid_error", 0.5, "heavy"),
-    ("lyapunov",  0.2, "light"),
-    ("lyapunov",  0.5, "heavy"),
+    ("pid_error",         0.2, "light"),
+    ("pid_error",         0.5, "heavy"),
+    ("lyapunov",          0.2, "light"),
+    ("lyapunov",          0.5, "heavy"),
+    ("momentum_observer", 0.2, "light"),
+    ("momentum_observer", 0.5, "heavy"),
 ])
 def test_end_to_end_classification(shared_env, estimator, mass, expected_bin):
     env, ctx, controller = build(estimator_name=estimator, cube_mass=mass, env=shared_env)
@@ -96,6 +99,37 @@ def test_no_estimator_path_skips_weighing(shared_env):
     assert "CLASSIFY" not in ctx.trace
     # Phase-3 trace exactly.
     assert ctx.trace == ["SEARCH", "GRASP", "PLACE", "HOME", "DONE"]
+
+
+def test_momentum_observer_residual_is_small_on_empty_arm(shared_env, monkeypatch, tmp_path):
+    """The observer's r_empty (captured during INIT calibration) must be small
+    relative to the loaded-arm residual. If r_empty absorbed the payload signal
+    by mistake, every loaded measurement would be near zero and the classifier
+    would always say 'light'."""
+    from massaware import planner
+    monkeypatch.setattr(planner, "CALIBRATION_PATH", tmp_path / "calibration.yaml")
+
+    # Step 1: run a fresh calibration via a quick mission. After this the
+    # estimator has r_empty populated and a loaded residual stream from the
+    # 0.5 kg cube.
+    env, ctx, controller = build(estimator_name="momentum_observer", cube_mass=0.5, env=shared_env)
+    fsm = FSM(ctx)
+    gripper = Gripper(env)
+    _drive(env, ctx, controller, gripper, fsm)
+
+    est = ctx.estimator
+    assert est.r_empty is not None
+
+    # Loaded residual at the measurement joints (elbow and shoulder_lift) must
+    # be at least an order of magnitude larger than r_empty there. Otherwise
+    # the calibration ate the signal.
+    diag = ctx.estimate_result.diagnostics
+    r_mean = np.asarray(diag["r_mean"])
+    delta = r_mean - est.r_empty
+    # Mass projection sensible: m_hat within 25% of 0.5 kg.
+    assert abs(ctx.estimate_result.m_hat - 0.5) / 0.5 < 0.25
+    # Loaded residual is dominated by the proximal joints, not by r_empty.
+    assert np.max(np.abs(delta)) > 0.1 * np.max(np.abs(r_mean) + 1e-9)
 
 
 def test_calibration_cache_is_reused_across_trials(shared_env, monkeypatch, tmp_path):

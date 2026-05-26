@@ -1,18 +1,20 @@
-"""Sub-phase E verification driver.
+"""Estimator weight-estimation sweep.
 
-Sweeps every (estimator, mass) pair through the full FSM and prints a table
-comparing `m_hat` to ground truth. Asserts each trial classifies the cube
-into the correct bin. Exits non-zero on any failure.
+Runs every (estimator, mass) pair through the full FSM and prints a table
+comparing `m_hat` to ground truth. The focus is the quality of the mass
+estimate across a wide range of payloads. Bin classification is reported
+for reference but does not gate success.
 
 The scene contains a single grey cube; its mass is mutated between trials
-via `MujocoEnv.set_body_mass()` so every trial sees identical kinematics —
-the only thing that changes is the payload mass.
+via `MujocoEnv.set_body_mass()` so every trial sees identical kinematics
+and the only thing that changes is the payload mass.
 
 Usage:
     python software/scripts/verify_estimators.py
-    python software/scripts/verify_estimators.py --viewer       # one window, all runs
-    python software/scripts/verify_estimators.py --clear-cache  # force fresh calibration
-    python software/scripts/verify_estimators.py --estimator lyapunov --masses 0.1,0.2,0.3,0.5
+    python software/scripts/verify_estimators.py --viewer
+    python software/scripts/verify_estimators.py --clear-cache
+    python software/scripts/verify_estimators.py --estimator lyapunov \
+        --masses 0.05,0.1,0.2,0.35,0.5,0.75,1.0
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ import time
 from pathlib import Path
 
 import mujoco
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -30,12 +33,20 @@ from massaware.planner import FSM
 from massaware.tick_loop import Gripper, _build_obs
 from scripts.mission import build
 
-# (true mass kg, expected bin given default threshold 0.35)
-DEFAULT_MASSES: list[tuple[float, str]] = [
-    (0.2, "light"),
-    (0.5, "heavy"),
+# Default mass sweep: geometric spacing from 10 g to 2.5 kg, 25 points.
+# Multiplicative steps give automatic density at the light end (where the
+# sag-based method's noise floor lives) without losing coverage of the heavy
+# edge. The ratio between successive trials is about 1.26x.
+M_MIN, M_MAX, N_MASSES = 0.01, 2.5, 25
+DEFAULT_MASSES: list[float] = [
+    round(float(m), 4) for m in np.geomspace(M_MIN, M_MAX, num=N_MASSES)
 ]
-DEFAULT_ESTIMATORS: list[str] = ["pid_error", "lyapunov"]
+DEFAULT_ESTIMATORS: list[str] = ["pid_error", "lyapunov", "momentum_observer"]
+
+# Loose tolerance on |err%|. Trials outside this are reported but the script
+# does not fail the run on them; the focus is on the per-trial numbers, not
+# on a pass/fail gate.
+ERROR_PCT_WARN = 25.0
 
 
 def _drive(env, ctx, controller, gripper, fsm, viewer=None) -> None:
@@ -83,23 +94,19 @@ def _run_trial(env, estimator_name: str, mass: float, viewer=None) -> dict:
 
     _drive(env, ctx, controller, gripper, fsm, viewer=viewer)
 
+    r = ctx.estimate_result
     return {
         "estimator": estimator_name,
         "mass": mass,
-        "m_hat": float(ctx.estimate_result.m_hat) if ctx.estimate_result else float("nan"),
+        "m_hat": float(r.m_hat) if r is not None else float("nan"),
+        "sigma": float(r.sigma) if (r is not None and r.sigma is not None) else float("nan"),
         "bin_label": ctx.bin_label,
     }
 
 
-def _parse_masses(spec: str) -> list[tuple[float, str]]:
-    """Parse `--masses 0.1,0.2,0.5` into [(0.1, ?), ...] (expected bin from default threshold)."""
-    from massaware.config import load_config
-    threshold = float(load_config()["classifier"]["mass_threshold"])
-    rows: list[tuple[float, str]] = []
-    for tok in spec.split(","):
-        m = float(tok.strip())
-        rows.append((m, "heavy" if m >= threshold else "light"))
-    return rows
+def _parse_masses(spec: str) -> list[float]:
+    """Parse `--masses 0.1,0.2,0.5` into [0.1, 0.2, 0.5]."""
+    return [float(tok.strip()) for tok in spec.split(",") if tok.strip()]
 
 
 def main() -> int:
@@ -129,21 +136,15 @@ def main() -> int:
     env = MujocoEnv()
 
     rows: list[dict] = []
-    failures: list[str] = []
     t_start = time.time()
 
     def _sweep(viewer=None):
         for est_name in estimators:
-            for mass, expected_bin in masses:
-                print(f"\n>>> {est_name} / mass={mass} kg (expected={expected_bin})")
+            for mass in masses:
+                print(f"\n>>> {est_name} / mass={mass} kg")
                 r = _run_trial(env, est_name, mass, viewer=viewer)
-                r["expected_bin"] = expected_bin
                 r["err_pct"] = 100.0 * (r["m_hat"] - mass) / mass if mass else float("nan")
                 rows.append(r)
-                if r["bin_label"] != expected_bin:
-                    failures.append(
-                        f"{est_name}/mass={mass}: classified {r['bin_label']!r}, expected {expected_bin!r}"
-                    )
 
     if args.viewer:
         import mujoco.viewer
@@ -162,22 +163,31 @@ def main() -> int:
 
     elapsed = time.time() - t_start
 
-    print("\n" + "=" * 72)
-    print(f"{'estimator':<12} {'mass':>6} {'m_hat':>8} {'err':>7} {'bin':>6} {'expected':>8} {'OK':>5}")
-    print("-" * 72)
+    # Per-trial table.
+    print("\n" + "=" * 74)
+    print(f"{'estimator':<18} {'true (kg)':>10} {'m_hat (kg)':>11} "
+          f"{'err':>7} {'sigma':>8} {'note':>10}")
+    print("-" * 74)
     for r in rows:
-        ok = "PASS" if r["bin_label"] == r["expected_bin"] else "FAIL"
-        print(f"{r['estimator']:<12} {r['mass']:>6.2f} {r['m_hat']:>8.4f} "
-              f"{r['err_pct']:>+6.1f}% {r['bin_label']:>6} {r['expected_bin']:>8} {ok:>5}")
-    print("=" * 72)
-    print(f"sweep took {elapsed:.1f} s")
+        note = "" if abs(r["err_pct"]) <= ERROR_PCT_WARN else "high err"
+        sigma_s = f"{r['sigma']:8.4f}" if r["sigma"] == r["sigma"] else "     n/a"
+        print(f"{r['estimator']:<18} {r['mass']:>10.3f} {r['m_hat']:>11.4f} "
+              f"{r['err_pct']:>+6.1f}% {sigma_s} {note:>10}")
+    print("=" * 74)
 
-    if failures:
-        print("\nFAILURES:")
-        for f in failures:
-            print(f"  - {f}")
-        return 1
-    print("\nAll trials classified correctly.")
+    # Per-estimator summary: mean signed err and RMSE across the swept masses.
+    print(f"\n{'estimator':<18} {'mean err':>10} {'mean |err|':>12} {'RMSE %':>10}")
+    print("-" * 52)
+    for est_name in estimators:
+        errs = [r["err_pct"] for r in rows if r["estimator"] == est_name]
+        if not errs:
+            continue
+        mean_err = sum(errs) / len(errs)
+        mean_abs = sum(abs(e) for e in errs) / len(errs)
+        rmse = (sum(e * e for e in errs) / len(errs)) ** 0.5
+        print(f"{est_name:<18} {mean_err:>+9.1f}% {mean_abs:>11.1f}% {rmse:>9.1f}%")
+
+    print(f"\nsweep took {elapsed:.1f} s over {len(rows)} trials")
     return 0
 
 

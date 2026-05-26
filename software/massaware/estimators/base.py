@@ -24,6 +24,10 @@ class EstimatorObs:
     jacobian_ee: np.ndarray   # 3x6 linear Jacobian at the EE site
     q_ref: np.ndarray
     ee_xyz: np.ndarray        # world-frame EE site position
+    # Joint-space inertia matrix at the current pose. Defaulted to zeros so
+    # math tests that construct EstimatorObs directly do not need to provide it;
+    # production _build_obs always overwrites with env.mass_matrix().
+    M: np.ndarray = field(default_factory=lambda: np.zeros((6, 6)))
 
 
 @dataclass

@@ -27,8 +27,9 @@ from massaware.config import load_config
 from massaware.controller import PIDController
 from massaware.estimators import Estimator, build as build_estimator
 # Importing the concrete estimator modules triggers their self-registration.
-from massaware.estimators import pid_error as _pid_error  # noqa: F401
-from massaware.estimators import lyapunov as _lyapunov    # noqa: F401
+from massaware.estimators import pid_error as _pid_error                 # noqa: F401
+from massaware.estimators import lyapunov as _lyapunov                   # noqa: F401
+from massaware.estimators import momentum_observer as _momentum_observer  # noqa: F401
 from massaware.mujoco_env import MujocoEnv
 from massaware.perception import GroundTruthPerception
 from massaware.planner import FSM, PlannerContext

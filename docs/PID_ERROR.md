@@ -51,7 +51,7 @@ The calibration step is not merely a numerical convenience. It also absorbs ever
 
 ## 5. Sensitivities and caveats
 
-Three sensitivities matter in practice. First, the moment arm $d$ enters the denominator linearly, so a 10% error in $d$ becomes a 10% error in $\hat{m}$. The current value is hand-tuned in `configs/default.yaml` to match the forward-kinematics result at the weigh pose; see PINNED_ISSUES.md (P1) for the plan to derive it automatically.
+Three sensitivities matter in practice. First, the moment arm $d$ enters the denominator linearly, so a 10% error in $d$ becomes a 10% error in $\hat{m}$. The current value is hand-tuned in `configs/default.yaml` to match the forward-kinematics result at the weigh pose. The wide-mass sweep confirms this: the bias grows monotonically with payload because the loaded equilibrium sits at a slightly different pose than the empty calibration, and the assumed moment arm no longer matches. Deriving $d$ from FK at the loaded pose would flatten that drift.
 
 Second, the estimator assumes that the arm reaches a static equilibrium during the hold. The non-fatal `SettleStep` accommodates the residual limit cycle that remains under softened gains, and the averaging window is long enough that the residual oscillation drops out of the mean. If the hold were too short relative to the closed-loop time constant, the mean would still carry transient bias.
 

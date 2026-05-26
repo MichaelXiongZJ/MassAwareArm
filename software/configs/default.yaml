@@ -17,9 +17,12 @@ estimator:
   name: lyapunov                         # null | pid_error | lyapunov | ...
   pid_error:
     measurement_joint: 2                 # elbow (scalar)
-    moment_arm: 0.492                    # m, derived via FK at weigh_qpos (see PINNED_ISSUES.md P1)
+    moment_arm: 0.492                    # m, computed once via FK at weigh_qpos; hand-tuned in YAML for now
   lyapunov:
     # No estimator-specific config; uses controller.kp + calibration data.
+  momentum_observer:
+    K_O: 50.0                            # observer gain, 1/s (time constant 1/K_O)
+    burn_in_s: 0.5                       # skip this much of the hold before averaging
 
 classifier:
   mass_threshold: 0.35                   # kg — boundary between "light" and "heavy"

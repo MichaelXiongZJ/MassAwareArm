@@ -55,6 +55,7 @@ def _build_obs(env: MujocoEnv, robot: "Robot", q_ref: np.ndarray, tau_cmd: np.nd
         jacobian_ee=robot.jacobian_ee(q),
         q_ref=np.asarray(q_ref, dtype=float).copy(),
         ee_xyz=ee_xyz,
+        M=env.mass_matrix(),
     )
 
 
