@@ -71,18 +71,6 @@ def main() -> int:
     controller = make_controller(args.controller, env, robot, cfg, profile)
     estimator = make_estimator(args.estimator, cfg, profile)
 
-    if estimator.requires_calibration:
-        run_calibration(
-            env,
-            robot,
-            controller,
-            estimator,
-            cfg["poses"]["weigh_qpos"],
-            hold_time=args.calibration_time,
-        )
-        controller.clear_overrides()
-        env.reset(arm_qpos=cfg["poses"]["home_qpos"])
-
     cube_xyz = env.data.xpos[env.model.body(CUBE_BODY).id].copy()
     trajectory = make_pick_weigh_plan(
         env,
@@ -94,6 +82,28 @@ def main() -> int:
         lift_to_weigh_time=args.lift_to_weigh_time,
         weigh_time=args.weigh_time,
     )
+
+    if estimator.requires_calibration:
+        run_calibration(
+            env,
+            robot,
+            controller,
+            estimator,
+            trajectory.waypoints.weigh,
+            hold_time=args.calibration_time,
+        )
+        env.reset(arm_qpos=cfg["poses"]["home_qpos"])
+        cube_xyz = env.data.xpos[env.model.body(CUBE_BODY).id].copy()
+        trajectory = make_pick_weigh_plan(
+            env,
+            robot,
+            cfg,
+            profile,
+            cube_xyz,
+            move_to_grasp_time=args.move_to_grasp_time,
+            lift_to_weigh_time=args.lift_to_weigh_time,
+            weigh_time=args.weigh_time,
+        )
 
     print(
         f"tracking mission: controller={args.controller}, estimator={args.estimator}, "
@@ -391,36 +401,39 @@ def run_calibration(
     print(f"calibrating estimator '{estimator.name}' for {hold_time:.1f}s")
     q_weigh = np.asarray(q_weigh, dtype=float)
     zero = np.zeros_like(q_weigh)
-    for _ in range(int(2.0 / env.dt)):
-        step_reference(env, None, controller, q_weigh, zero, zero, False)
-    ctx = SimpleNamespace(weigh_qpos=q_weigh)
-    estimator.start_calibration(ctx)
-    controller.apply_overrides(estimator.controller_overrides())
-    gravity_mask = estimator.gravity_comp_mask(6)
-    for _ in range(max(1, int(1.0 / env.dt))):
-        step_reference(
-            env,
-            None,
-            controller,
-            q_weigh,
-            zero,
-            zero,
-            False,
-            gravity_mask=gravity_mask,
-        )
-    for _ in range(max(1, int(hold_time / env.dt))):
-        output = step_reference(
-            env,
-            None,
-            controller,
-            q_weigh,
-            zero,
-            zero,
-            False,
-            gravity_mask=gravity_mask,
-        )
-        estimator.update_calibration(build_obs(env, robot, q_weigh, output.tau_cmd))
-    estimator.load_calibration(estimator.finish_calibration())
+    try:
+        for _ in range(int(2.0 / env.dt)):
+            step_reference(env, None, controller, q_weigh, zero, zero, False)
+        ctx = SimpleNamespace(weigh_qpos=q_weigh)
+        estimator.start_calibration(ctx)
+        controller.apply_overrides(estimator.controller_overrides())
+        gravity_mask = estimator.gravity_comp_mask(6)
+        for _ in range(max(1, int(1.0 / env.dt))):
+            step_reference(
+                env,
+                None,
+                controller,
+                q_weigh,
+                zero,
+                zero,
+                False,
+                gravity_mask=gravity_mask,
+            )
+        for _ in range(max(1, int(hold_time / env.dt))):
+            output = step_reference(
+                env,
+                None,
+                controller,
+                q_weigh,
+                zero,
+                zero,
+                False,
+                gravity_mask=gravity_mask,
+            )
+            estimator.update_calibration(build_obs(env, robot, q_weigh, output.tau_cmd))
+        estimator.load_calibration(estimator.finish_calibration())
+    finally:
+        controller.clear_overrides()
 
 
 def step_reference(

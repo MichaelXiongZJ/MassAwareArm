@@ -40,7 +40,7 @@ TRACKING_PROFILE = TrackingProfile(
     weigh_hold_time_min=2.0,
     release_hold_time=0.8,
     blend_time_fraction=0.25,
-    collect_lift_samples=True,
+    collect_lift_samples=False,
     use_analytical_ik=True,
 )
 

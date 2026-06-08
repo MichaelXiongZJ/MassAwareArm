@@ -2,10 +2,10 @@
 
 Principle
 ---------
-With the measurement joint's gravity compensation disabled and an integral
-term active, the PID controller's steady-state `tau_cmd` at that joint must
-balance the joint torque produced by gravity acting on everything distal to
-it. The difference between loaded and unloaded steady-state torque is
+With the measurement joint's gravity compensation disabled, the controller
+torque at that joint must balance the joint torque produced by gravity acting
+on everything distal to it. The difference between loaded and unloaded
+steady-state torque is
 
     tau_cmd_loaded - tau_ss_empty = m * g * moment_arm
 
@@ -14,8 +14,8 @@ so the mass is
     m_hat = (mean(tau_cmd) - tau_ss_empty) / (g * moment_arm)
 
 `tau_ss_empty` is captured at INIT via `calibrate()` (same pose, same mask,
-empty gripper). `moment_arm` is hand-tuned in config today; the comment in
-`configs/default.yaml` records the FK-derived target value.
+empty gripper). The effective moment arm is measured from the active
+end-effector Jacobian so the estimator follows the actual IK weighing pose.
 """
 
 from __future__ import annotations
@@ -34,11 +34,13 @@ class PIDErrorEstimator(Estimator):
 
     def __init__(self, cfg: dict):
         self.measurement_joint: int = int(cfg["measurement_joint"])
-        self.moment_arm: float = float(cfg["moment_arm"])
+        self.moment_arm_fallback: float = float(cfg.get("moment_arm", 1.0))
         self.tau_ss_empty: float | None = None  # populated by load_calibration()
         self._samples: list[float] = []
+        self._moment_arm_samples: list[float] = []
         # Calibration accumulator (separate buffer from weigh samples).
         self._cal_samples: list[float] = []
+        self._cal_moment_arm_samples: list[float] = []
 
         # Softened gains on the measurement joint avoid the high-stiffness
         # limit cycle the uncompensated joint produces with base kp/kd. The
@@ -69,9 +71,11 @@ class PIDErrorEstimator(Estimator):
 
     def reset(self) -> None:
         self._samples.clear()
+        self._moment_arm_samples.clear()
 
     def update(self, obs: EstimatorObs) -> None:
         self._samples.append(float(obs.tau_cmd[self.measurement_joint]))
+        self._moment_arm_samples.append(self._moment_arm(obs))
 
     def estimate(self) -> EstimateResult:
         if self.tau_ss_empty is None:
@@ -81,8 +85,9 @@ class PIDErrorEstimator(Estimator):
         tau_arr = np.asarray(self._samples, dtype=float)
         tau_mean = float(tau_arr.mean())
         tau_std = float(tau_arr.std(ddof=1)) if tau_arr.size > 1 else 0.0
-        m_hat = (tau_mean - self.tau_ss_empty) / (GRAVITY * self.moment_arm)
-        sigma = tau_std / (GRAVITY * self.moment_arm) if tau_std > 0 else None
+        moment_arm = self._mean_moment_arm(self._moment_arm_samples)
+        m_hat = (tau_mean - self.tau_ss_empty) / (GRAVITY * moment_arm)
+        sigma = tau_std / (GRAVITY * moment_arm) if tau_std > 0 else None
         return EstimateResult(
             m_hat=m_hat,
             sigma=sigma,
@@ -90,7 +95,8 @@ class PIDErrorEstimator(Estimator):
                 "tau_mean": tau_mean,
                 "tau_std": tau_std,
                 "tau_ss_empty": self.tau_ss_empty,
-                "moment_arm": self.moment_arm,
+                "moment_arm": moment_arm,
+                "moment_arm_fallback": self.moment_arm_fallback,
                 "n_samples": int(tau_arr.size),
             },
         )
@@ -99,24 +105,41 @@ class PIDErrorEstimator(Estimator):
 
     def start_calibration(self, ctx) -> None:  # noqa: ARG002
         self._cal_samples.clear()
+        self._cal_moment_arm_samples.clear()
 
     def update_calibration(self, obs: EstimatorObs) -> None:
         self._cal_samples.append(float(obs.tau_cmd[self.measurement_joint]))
+        self._cal_moment_arm_samples.append(self._moment_arm(obs))
 
     def finish_calibration(self) -> dict:
         if not self._cal_samples:
             raise RuntimeError("PIDErrorEstimator.finish_calibration() called with no samples")
         tau_ss = float(np.mean(self._cal_samples))
+        moment_arm = self._mean_moment_arm(self._cal_moment_arm_samples)
         # Persist a full 6-vector for human readability; only the meas joint is used.
         full = [0.0] * 6
         full[self.measurement_joint] = tau_ss
-        return {"tau_ss_empty": full}
+        return {"tau_ss_empty": full, "moment_arm_empty": moment_arm}
 
     def load_calibration(self, data: dict) -> None:
         if "tau_ss_empty" not in data:
             raise KeyError("calibration data missing 'tau_ss_empty' (required by pid_error)")
         arr = np.asarray(data["tau_ss_empty"], dtype=float)
         self.tau_ss_empty = float(arr[self.measurement_joint])
+
+    def _moment_arm(self, obs: EstimatorObs) -> float:
+        """Vertical payload moment arm for the measurement joint."""
+        if obs.jacobian_ee.shape[0] >= 3 and obs.jacobian_ee.shape[1] > self.measurement_joint:
+            value = abs(float(obs.jacobian_ee[2, self.measurement_joint]))
+            if value > 1e-6:
+                return value
+        return self.moment_arm_fallback
+
+    def _mean_moment_arm(self, samples: list[float]) -> float:
+        if not samples:
+            return self.moment_arm_fallback
+        value = float(np.mean(np.asarray(samples, dtype=float)))
+        return value if value > 1e-6 else self.moment_arm_fallback
 
 
 register("pid_error", PIDErrorEstimator)
