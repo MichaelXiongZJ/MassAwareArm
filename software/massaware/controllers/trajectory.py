@@ -8,35 +8,6 @@ import numpy as np
 
 
 @dataclass(frozen=True)
-class JointWaypoints:
-    """Joint-space points for pick, weigh, and place."""
-
-    initial: np.ndarray
-    grasp: np.ndarray
-    weigh: np.ndarray
-    release_approach: np.ndarray
-    release: np.ndarray
-
-
-@dataclass(frozen=True)
-class PickWeighWaypoints:
-    """Joint-space points for the pick and weighing portion."""
-
-    initial: np.ndarray
-    grasp: np.ndarray
-    weigh: np.ndarray
-
-
-@dataclass(frozen=True)
-class ReleaseWaypoints:
-    """Joint-space points for the release portion."""
-
-    initial: np.ndarray
-    release_approach: np.ndarray
-    release: np.ndarray
-
-
-@dataclass(frozen=True)
 class TrajectorySample:
     stage: str
     q: np.ndarray
@@ -103,7 +74,9 @@ class PickWeighTrajectory(JointSegmentTrajectory):
 
     def __init__(
         self,
-        waypoints: PickWeighWaypoints,
+        q_initial: np.ndarray,
+        q_grasp: np.ndarray,
+        q_weigh: np.ndarray,
         move_to_grasp_time: float = 3.0,
         grasp_hold_time: float = 1.0,
         lift_to_weigh_time: float = 2.0,
@@ -111,49 +84,45 @@ class PickWeighTrajectory(JointSegmentTrajectory):
         blend_time_fraction: float = 0.25,
         collect_lift_samples: bool = False,
     ) -> None:
-        self.waypoints = waypoints
         self.blend_time_fraction = float(np.clip(blend_time_fraction, 1e-6, 0.5))
         segments = [
             move_segment(
                 "move_to_grasp",
-                waypoints.initial,
-                waypoints.grasp,
+                q_initial,
+                q_grasp,
                 move_to_grasp_time,
                 self._blend_time(move_to_grasp_time),
                 gripper_closed=False,
             ),
             hold_segment(
                 "grasp",
-                waypoints.grasp,
+                q_grasp,
                 grasp_hold_time,
                 self._blend_time(grasp_hold_time),
                 gripper_closed=True,
             ),
             move_segment(
                 "lift_to_weigh",
-                waypoints.grasp,
-                waypoints.weigh,
+                q_grasp,
+                q_weigh,
                 lift_to_weigh_time,
                 self._blend_time(lift_to_weigh_time),
                 gripper_closed=True,
                 collect_mass_samples=collect_lift_samples,
-                compensate_payload=True,
             ),
             hold_segment(
                 "weigh_hold",
-                waypoints.weigh,
+                q_weigh,
                 weigh_hold_time,
                 self._blend_time(weigh_hold_time),
                 gripper_closed=True,
                 collect_mass_samples=True,
-                compensate_payload=True,
             ),
         ]
         super().__init__(
             segments,
-            waypoints.weigh,
+            q_weigh,
             final_gripper_closed=True,
-            final_compensate_payload=True,
         )
 
     def _blend_time(self, duration: float) -> float:
@@ -165,24 +134,25 @@ class ReleaseTrajectory(JointSegmentTrajectory):
 
     def __init__(
         self,
-        waypoints: ReleaseWaypoints,
+        q_initial: np.ndarray,
+        q_release_approach: np.ndarray,
+        q_release: np.ndarray,
         move_to_release_time: float = 3.0,
         release_hold_time: float = 0.8,
         blend_time_fraction: float = 0.25,
     ) -> None:
-        self.waypoints = waypoints
         self.blend_time_fraction = float(np.clip(blend_time_fraction, 1e-6, 0.5))
         approach_time, adjust_time = split_duration_by_joint_distance(
             move_to_release_time,
-            waypoints.initial,
-            waypoints.release_approach,
-            waypoints.release,
+            q_initial,
+            q_release_approach,
+            q_release,
         )
         segments = [
             move_segment(
                 "move_to_release_approach",
-                waypoints.initial,
-                waypoints.release_approach,
+                q_initial,
+                q_release_approach,
                 approach_time,
                 self._blend_time(approach_time),
                 gripper_closed=True,
@@ -190,8 +160,8 @@ class ReleaseTrajectory(JointSegmentTrajectory):
             ),
             move_segment(
                 "move_to_release",
-                waypoints.release_approach,
-                waypoints.release,
+                q_release_approach,
+                q_release,
                 adjust_time,
                 self._blend_time(adjust_time),
                 gripper_closed=True,
@@ -199,57 +169,16 @@ class ReleaseTrajectory(JointSegmentTrajectory):
             ),
             hold_segment(
                 "release",
-                waypoints.release,
+                q_release,
                 release_hold_time,
                 self._blend_time(release_hold_time),
                 gripper_closed=False,
             ),
         ]
-        super().__init__(segments, waypoints.release, final_gripper_closed=False)
+        super().__init__(segments, q_release, final_gripper_closed=False)
 
     def _blend_time(self, duration: float) -> float:
         return max(float(duration), 1e-9) * self.blend_time_fraction
-
-
-class PickWeighPlaceTrajectory(JointSegmentTrajectory):
-    """Full external-style pick, weigh, and place trajectory."""
-
-    def __init__(
-        self,
-        waypoints: JointWaypoints,
-        move_to_grasp_time: float = 3.0,
-        grasp_hold_time: float = 1.0,
-        lift_to_weigh_time: float = 2.0,
-        weigh_hold_time: float = 1.5,
-        move_to_release_time: float = 3.0,
-        release_hold_time: float = 0.8,
-        blend_time_fraction: float = 0.25,
-        collect_lift_samples: bool = False,
-    ) -> None:
-        pick = PickWeighTrajectory(
-            PickWeighWaypoints(waypoints.initial, waypoints.grasp, waypoints.weigh),
-            move_to_grasp_time=move_to_grasp_time,
-            grasp_hold_time=grasp_hold_time,
-            lift_to_weigh_time=lift_to_weigh_time,
-            weigh_hold_time=weigh_hold_time,
-            blend_time_fraction=blend_time_fraction,
-            collect_lift_samples=collect_lift_samples,
-        )
-        release = ReleaseTrajectory(
-            ReleaseWaypoints(
-                waypoints.weigh,
-                waypoints.release_approach,
-                waypoints.release,
-            ),
-            move_to_release_time=move_to_release_time,
-            release_hold_time=release_hold_time,
-            blend_time_fraction=blend_time_fraction,
-        )
-        super().__init__(
-            [*pick.segments, *release.segments],
-            waypoints.release,
-            final_gripper_closed=False,
-        )
 
 
 JointTrajectory = JointSegmentTrajectory
@@ -268,7 +197,9 @@ def make_pick_weigh_trajectory(
     collect_lift_samples: bool = False,
 ) -> PickWeighTrajectory:
     return PickWeighTrajectory(
-        PickWeighWaypoints(q_initial, q_grasp, q_weigh),
+        q_initial,
+        q_grasp,
+        q_weigh,
         move_to_grasp_time=move_to_grasp_time,
         grasp_hold_time=grasp_hold_time,
         lift_to_weigh_time=lift_to_weigh_time,
@@ -288,7 +219,9 @@ def make_release_trajectory(
     blend_time_fraction: float = 0.25,
 ) -> ReleaseTrajectory:
     return ReleaseTrajectory(
-        ReleaseWaypoints(q_initial, q_release_approach, q_release),
+        q_initial,
+        q_release_approach,
+        q_release,
         move_to_release_time=move_to_release_time,
         release_hold_time=release_hold_time,
         blend_time_fraction=blend_time_fraction,

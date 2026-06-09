@@ -13,6 +13,8 @@ class TrackingProfile:
     kp: np.ndarray
     ki: np.ndarray
     kd: np.ndarray
+    inverse_dynamics_kp: np.ndarray
+    inverse_dynamics_kd: np.ndarray
     grasp_xyz: np.ndarray | None
     weigh_xyz: np.ndarray | None
     light_release_xyz: np.ndarray | None
@@ -28,9 +30,11 @@ class TrackingProfile:
 
 TRACKING_PROFILE = TrackingProfile(
     name="tracking",
-    kp=np.array([45.0, 55.0, 45.0, 18.0, 14.0, 10.0]),
+    kp=np.array([1260.0, 1540.0, 1260.0, 504.0, 392.0, 280.0]),
     ki=np.zeros(6),
-    kd=np.array([14.0, 16.0, 14.0, 7.0, 6.0, 5.0]),
+    kd=np.array([98.0, 112.0, 98.0, 49.0, 42.0, 35.0]),
+    inverse_dynamics_kp=np.array([1800.0, 2200.0, 1800.0, 720.0, 560.0, 400.0]),
+    inverse_dynamics_kd=np.array([70.0, 80.0, 70.0, 35.0, 30.0, 25.0]),
     grasp_xyz=np.array([0.55, 0.0, 0.45]),
     weigh_xyz=np.array([0.55, 0.0, 0.73]),
     light_release_xyz=np.array([0.0, 0.68, 0.50]),
@@ -55,6 +59,8 @@ def tracking_profile(name: str, cfg: dict) -> TrackingProfile:
         kp=np.asarray(cfg["controller"]["kp"], dtype=float),
         ki=np.asarray(cfg["controller"]["ki"], dtype=float),
         kd=np.asarray(cfg["controller"]["kd"], dtype=float),
+        inverse_dynamics_kp=np.asarray(cfg["controller"]["kp"], dtype=float),
+        inverse_dynamics_kd=np.asarray(cfg["controller"]["kd"], dtype=float),
         grasp_xyz=None,
         weigh_xyz=None,
         light_release_xyz=np.asarray(cfg["poses"]["light_bin_drop"], dtype=float),
@@ -67,3 +73,18 @@ def tracking_profile(name: str, cfg: dict) -> TrackingProfile:
         collect_lift_samples=False,
         use_analytical_ik=False,
     )
+
+
+def controller_gains(
+    profile: TrackingProfile,
+    controller_name: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if controller_name == "pid_tracking":
+        return profile.kp, profile.ki, profile.kd
+    if controller_name == "inverse_dynamics":
+        return (
+            profile.inverse_dynamics_kp,
+            np.zeros_like(profile.inverse_dynamics_kp),
+            profile.inverse_dynamics_kd,
+        )
+    raise ValueError(f"Unknown controller '{controller_name}'")

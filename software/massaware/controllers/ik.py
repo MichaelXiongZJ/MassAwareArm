@@ -8,15 +8,13 @@ import mujoco
 import numpy as np
 
 from massaware.mujoco_env import EE_SITE, MujocoEnv
-from massaware.robot import Robot
 
 
 class RobotIKAdapter:
     """Expose the small robot API needed by the analytical UR5e solver."""
 
-    def __init__(self, env: MujocoEnv, robot: Robot) -> None:
+    def __init__(self, env: MujocoEnv) -> None:
         self.env = env
-        self.robot = robot
         self.ee_site_id = env.model.site(EE_SITE).id
         self.qpos_ids = env._ur5e_qpos_adr
         self.qvel_ids = env._ur5e_dof_adr
@@ -24,9 +22,6 @@ class RobotIKAdapter:
     @property
     def dof(self) -> int:
         return len(self.qpos_ids)
-
-    def qpos(self) -> np.ndarray:
-        return self.env.get_arm_qpos()
 
     def set_qpos(self, qpos: np.ndarray) -> None:
         self.env.set_arm_qpos(qpos)
@@ -41,7 +36,7 @@ class RobotIKAdapter:
     def joint_limits(self) -> tuple[np.ndarray, np.ndarray]:
         q_min = np.empty(self.dof)
         q_max = np.empty(self.dof)
-        for i, qpos_id in enumerate(self.qpos_ids):
+        for i in range(self.dof):
             joint_id = int(self.env.model.dof_jntid[self.qvel_ids[i]])
             if self.env.model.jnt_limited[joint_id]:
                 q_min[i], q_max[i] = self.env.model.jnt_range[joint_id]
@@ -86,12 +81,10 @@ class UR5eAnalyticalIK:
     def __init__(
         self,
         robot: RobotIKAdapter,
-        rest_q: np.ndarray,
         orientation_gain: float = 0.5,
         acceptable_error: float = 3e-2,
     ) -> None:
         self.robot = robot
-        self.rest_q = rest_q.copy()
         self.orientation_gain = float(orientation_gain)
         self.acceptable_error = float(acceptable_error)
 
@@ -294,8 +287,8 @@ class UR5eAnalyticalIK:
         return solutions
 
 
-def make_external_ik(env: MujocoEnv, robot: Robot, rest_q: np.ndarray) -> UR5eAnalyticalIK:
-    return UR5eAnalyticalIK(RobotIKAdapter(env, robot), rest_q=np.asarray(rest_q, dtype=float))
+def make_external_ik(env: MujocoEnv) -> UR5eAnalyticalIK:
+    return UR5eAnalyticalIK(RobotIKAdapter(env))
 
 
 def wrap_to_pi(angle: np.ndarray | float) -> np.ndarray | float:

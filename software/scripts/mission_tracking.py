@@ -19,7 +19,11 @@ from massaware.classify import classify_mass
 from massaware.config import load_config
 from massaware.controllers.attachment import TrackingAttachment
 from massaware.controllers.ik import make_external_ik
-from massaware.controllers.profiles import TrackingProfile, tracking_profile
+from massaware.controllers.profiles import (
+    TrackingProfile,
+    controller_gains,
+    tracking_profile,
+)
 from massaware.controllers import (
     InverseDynamicsTrackingController,
     JointReference,
@@ -69,7 +73,7 @@ def main() -> int:
     robot = Robot(env)
     gripper = Gripper(env)
     controller = make_controller(args.controller, env, robot, cfg, profile)
-    estimator = make_estimator(args.estimator, cfg, profile)
+    estimator = make_estimator(args.estimator, cfg, profile, args.controller)
 
     cube_xyz = env.data.xpos[env.model.body(CUBE_BODY).id].copy()
     trajectory = make_pick_weigh_plan(
@@ -89,7 +93,7 @@ def main() -> int:
             robot,
             controller,
             estimator,
-            trajectory.waypoints.weigh,
+            trajectory.final_q,
             hold_time=args.calibration_time,
         )
         env.reset(arm_qpos=cfg["poses"]["home_qpos"])
@@ -161,11 +165,9 @@ def make_controller(
     active_profile = profile
     if active_profile is None:
         raise ValueError("make_controller requires a tracking profile")
-    kp = active_profile.kp
-    ki = active_profile.ki
-    kd = active_profile.kd
+    kp, ki, kd = controller_gains(active_profile, name)
     if name == "pid_tracking":
-        return TrackingPIDController(env, kp=kp, ki=ki, kd=kd)
+        return TrackingPIDController(env, robot, kp=kp, ki=ki, kd=kd)
     if name == "inverse_dynamics":
         return InverseDynamicsTrackingController(env, robot, kp=kp, kd=kd)
     raise ValueError(f"Unknown controller '{name}'")
@@ -175,6 +177,7 @@ def make_estimator(
     name: str,
     cfg: dict,
     profile: TrackingProfile | None = None,
+    controller_name: str = "pid_tracking",
 ) -> Estimator:
     est_cfg = cfg.get("estimator", {}) or {}
     runtime_cfg = dict(est_cfg.get(name, {}) or {})
@@ -182,8 +185,9 @@ def make_estimator(
         runtime_cfg["controller_kp"] = np.asarray(cfg["controller"]["kp"], dtype=float)
         runtime_cfg["controller_kd"] = np.asarray(cfg["controller"]["kd"], dtype=float)
     else:
-        runtime_cfg["controller_kp"] = profile.kp.copy()
-        runtime_cfg["controller_kd"] = profile.kd.copy()
+        kp, _ki, kd = controller_gains(profile, controller_name)
+        runtime_cfg["controller_kp"] = kp.copy()
+        runtime_cfg["controller_kd"] = kd.copy()
     return build_estimator(name, runtime_cfg)
 
 
@@ -201,7 +205,7 @@ def make_pick_weigh_plan(
     q_home = np.asarray(cfg["poses"]["home_qpos"], dtype=float)
     q_weigh = np.asarray(cfg["poses"]["weigh_qpos"], dtype=float)
     target_orientation = env.ee_pose()[1]
-    ik_solver = make_external_ik(env, robot, q_home) if profile.use_analytical_ik else None
+    ik_solver = make_external_ik(env) if profile.use_analytical_ik else None
     grasp_xyz = profile.grasp_xyz if profile.grasp_xyz is not None else cube_xyz
     if profile.weigh_xyz is not None:
         q_weigh = solve_ik(
@@ -289,7 +293,7 @@ def run_tracking_mission(
                     release_approach_xyz = release_approach_target(profile, release_xyz)
                     target_orientation = env.ee_pose()[1]
                     ik_solver = (
-                        make_external_ik(env, robot, np.asarray(cfg["poses"]["home_qpos"], dtype=float))
+                        make_external_ik(env)
                         if profile.use_analytical_ik
                         else None
                     )

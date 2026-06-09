@@ -107,7 +107,7 @@ def run_trial(
         gripper = Gripper(env)
         profile = tracking_profile(profile_name, cfg)
         controller = make_controller(controller_name, env, robot, cfg, profile)
-        estimator = make_estimator(estimator_name, cfg, profile)
+        estimator = make_estimator(estimator_name, cfg, profile, controller_name)
 
         if estimator.requires_calibration:
             run_calibration(

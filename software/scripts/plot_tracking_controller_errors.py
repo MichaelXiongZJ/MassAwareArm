@@ -29,8 +29,7 @@ from massaware.controllers.profiles import TrackingProfile, tracking_profile
 from massaware.controllers.references import JointReference
 from massaware.controllers.trajectory import JointTrajectory, make_release_trajectory
 from massaware.estimators import inverse_dynamics as _inverse_dynamics  # noqa: F401
-from massaware.estimators import build as build_estimator
-from massaware.estimators.base import Estimator, EstimatorObs
+from massaware.estimators.base import Estimator
 from massaware.mujoco_env import MujocoEnv, UR5E_JOINTS
 from massaware.robot import Robot
 from massaware.tick_loop import Gripper, GripperCmd
@@ -39,6 +38,7 @@ from mission_tracking import (
     CUBE_BODY,
     build_obs,
     make_controller,
+    make_estimator,
     make_pick_weigh_plan,
     release_approach_target,
     release_target,
@@ -105,6 +105,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--joint-threshold-deg", type=float, default=2.0)
     parser.add_argument("--ee-threshold-mm", type=float, default=5.0)
     parser.add_argument("--skip-ee-plots", action="store_true")
+    parser.add_argument(
+        "--sweep-payload-limits",
+        action="store_true",
+        help="also sweep payload masses and report tracking-acceptable torque limits",
+    )
+    parser.add_argument(
+        "--sweep-masses",
+        default="0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1,1.25,1.5,2,3,5,7.5,10,15,20",
+    )
+    parser.add_argument(
+        "--limit-joint-peak-deg",
+        type=float,
+        default=2.0,
+        help="payload sweep pass threshold for peak joint error",
+    )
+    parser.add_argument(
+        "--limit-ee-peak-mm",
+        type=float,
+        default=20.0,
+        help="payload sweep pass threshold for peak end-effector error",
+    )
     return parser.parse_args()
 
 
@@ -162,6 +183,9 @@ def main() -> int:
             threshold_deg=args.joint_threshold_deg,
         )
 
+    if args.sweep_payload_limits:
+        sweep_payload_limits(cfg, profile, args)
+
     print(f"wrote plots to {output_dir}")
     return 0
 
@@ -184,7 +208,7 @@ def run_controller_trace(
     robot = Robot(env)
     gripper = Gripper(env)
     controller = make_controller(controller_name, env, robot, cfg, profile)
-    estimator = build_estimator("inverse_dynamics", {"min_samples": 30, "g": 9.81})
+    estimator = make_estimator("inverse_dynamics", cfg, profile, controller_name)
 
     cube_xyz = env.data.xpos[env.model.body(CUBE_BODY).id].copy()
     active = make_pick_weigh_plan(
@@ -212,6 +236,7 @@ def run_controller_trace(
     phase = "pick_weigh"
     start_time = env.data.time
     last_stage = None
+    overrides_active = False
     estimated_mass = 0.0
     release_bin = classify_mass(mass, float(cfg["classifier"]["mass_threshold"]))
     attachment = TrackingAttachment(env, robot, CUBE_BODY)
@@ -223,7 +248,13 @@ def run_controller_trace(
 
             if sample.done:
                 if phase == "pick_weigh":
-                    estimated_mass = estimate_payload_mass(estimator, default=mass)
+                    if overrides_active:
+                        controller.clear_overrides()
+                        overrides_active = False
+                    estimated_mass = estimate_payload_mass(
+                        estimator,
+                        fallback=mass if payload_comp_mode == "oracle" else None,
+                    )
                     if payload_comp_mode == "estimated":
                         release_bin = classify_mass(
                             estimated_mass,
@@ -234,7 +265,7 @@ def run_controller_trace(
                     release_approach_xyz = release_approach_target(profile, release_xyz)
                     target_orientation = env.ee_pose()[1]
                     ik_solver = (
-                        make_external_ik(env, robot, np.asarray(cfg["poses"]["home_qpos"], dtype=float))
+                        make_external_ik(env)
                         if profile.use_analytical_ik
                         else None
                     )
@@ -270,6 +301,12 @@ def run_controller_trace(
 
             if sample.stage != last_stage:
                 stage_transitions.append((env.data.time, sample.stage))
+                if sample.collect_mass_samples:
+                    controller.apply_overrides(estimator.controller_overrides())
+                    overrides_active = True
+                elif overrides_active:
+                    controller.clear_overrides()
+                    overrides_active = False
                 last_stage = sample.stage
 
             attachment.set_attached(sample.gripper_closed)
@@ -285,13 +322,22 @@ def run_controller_trace(
             q = env.get_arm_qpos()
             q_dot = env.get_arm_qvel()
             reference = JointReference(sample.q, sample.q_dot, sample.q_ddot)
+            gravity_mask = (
+                estimator.gravity_comp_mask(6)
+                if sample.collect_mass_samples
+                else np.ones(6)
+            )
             controller_payload_mass = controller_payload(
                 payload_comp_mode,
                 sample,
                 true_mass=mass,
                 estimated_mass=estimated_mass,
             )
-            output = controller.command(reference, payload_mass=controller_payload_mass)
+            output = controller.command(
+                reference,
+                gravity_mask=gravity_mask,
+                payload_mass=controller_payload_mass,
+            )
             gripper.apply(GripperCmd.CLOSE if sample.gripper_closed else GripperCmd.OPEN)
 
             times.append(env.data.time)
@@ -311,6 +357,8 @@ def run_controller_trace(
             if sample.collect_mass_samples:
                 estimator.update(build_obs(env, robot, sample.q, output.tau_cmd))
     finally:
+        if overrides_active:
+            controller.clear_overrides()
         attachment.restore()
 
     return TrackingTrace(
@@ -334,11 +382,13 @@ def run_controller_trace(
     )
 
 
-def estimate_payload_mass(estimator: Estimator, default: float) -> float:
+def estimate_payload_mass(estimator: Estimator, fallback: float | None) -> float:
     try:
         return float(estimator.estimate().m_hat)
     except RuntimeError:
-        return float(default)
+        if fallback is None:
+            raise
+        return float(fallback)
 
 
 def controller_payload(
@@ -360,6 +410,121 @@ def controller_payload(
 def actuator_ctrl_limits(env: MujocoEnv) -> tuple[np.ndarray, np.ndarray]:
     ctrlrange = env.model.actuator_ctrlrange[env._ur5e_ctrl_adr]
     return ctrlrange[:, 0].copy(), ctrlrange[:, 1].copy()
+
+
+def sweep_payload_limits(cfg: dict, profile: TrackingProfile, args: argparse.Namespace) -> None:
+    masses = parse_float_csv(args.sweep_masses)
+    controllers = list(args.controllers)
+    print("\nPayload sweep, tracking-accuracy pass/fail")
+    print(
+        "pass criteria: "
+        f"joint peak <= {args.limit_joint_peak_deg:.3g} deg, "
+        f"EE peak <= {args.limit_ee_peak_mm:.3g} mm, "
+        f"payload={args.payload_comp_mode}"
+    )
+    print(
+        f"{'controller':<18} {'mass':>7} {'joint_peak':>11} {'ee_peak':>10} "
+        f"{'max_tau':>10} {'tau/lim':>9} {'status':>8}"
+    )
+    print("-" * 82)
+    rows: list[dict] = []
+    for controller_name in controllers:
+        for mass in masses:
+            row = payload_sweep_row(cfg, profile, controller_name, mass, args)
+            rows.append(row)
+            status = "PASS" if row["passed"] else "FAIL"
+            if row["error"]:
+                status = "ERROR"
+            print(
+                f"{controller_name:<18} {mass:>7.3f} "
+                f"{fmt(row['joint_peak']):>11} {fmt(row['ee_peak']):>10} "
+                f"{fmt(row['max_tau']):>10} {fmt(row['torque_ratio']):>9} "
+                f"{status:>8} {row['error']}"
+            )
+
+    print("\nTracking-acceptable payload/torque limit from sampled masses:")
+    for controller_name in controllers:
+        passing = [
+            row
+            for row in rows
+            if row["controller"] == controller_name and row["passed"]
+        ]
+        if not passing:
+            print(f"  {controller_name:<18} no sampled mass passed")
+            continue
+        best_mass = max(passing, key=lambda row: row["mass"])
+        best_torque = max(passing, key=lambda row: row["max_tau"])
+        print(
+            f"  {controller_name:<18} "
+            f"max mass={best_mass['mass']:.3f} kg "
+            f"(max_tau={best_mass['max_tau']:.2f} N-m, "
+            f"tau/lim={best_mass['torque_ratio']:.3f}); "
+            f"largest passing torque={best_torque['max_tau']:.2f} N-m "
+            f"at {best_torque['mass']:.3f} kg"
+        )
+
+
+def payload_sweep_row(
+    cfg: dict,
+    profile: TrackingProfile,
+    controller_name: str,
+    mass: float,
+    args: argparse.Namespace,
+) -> dict:
+    try:
+        trace = run_controller_trace(
+            cfg,
+            profile,
+            controller_name,
+            mass=mass,
+            payload_comp_mode=args.payload_comp_mode,
+            move_to_grasp_time=args.move_to_grasp_time,
+            lift_to_weigh_time=args.lift_to_weigh_time,
+            move_to_release_time=release_time(args.move_to_release_time, profile),
+            weigh_time=args.weigh_time,
+        )
+        joint_error_deg = np.rad2deg(trace.q_ref - trace.q)
+        ee_error_mm = (trace.desired_position - trace.actual_position) * 1000.0
+        torque_limit = np.maximum(np.abs(trace.torque_min), np.abs(trace.torque_max))
+        joint_peak = float(np.max(np.abs(joint_error_deg)))
+        ee_peak = float(np.max(np.linalg.norm(ee_error_mm, axis=1)))
+        max_tau = float(np.max(np.abs(trace.tau)))
+        torque_ratio = float(np.max(np.abs(trace.tau) / torque_limit))
+        passed = (
+            joint_peak <= args.limit_joint_peak_deg
+            and ee_peak <= args.limit_ee_peak_mm
+        )
+        return {
+            "controller": controller_name,
+            "mass": mass,
+            "joint_peak": joint_peak,
+            "ee_peak": ee_peak,
+            "max_tau": max_tau,
+            "torque_ratio": torque_ratio,
+            "passed": passed,
+            "error": "",
+        }
+    except Exception as exc:
+        return {
+            "controller": controller_name,
+            "mass": mass,
+            "joint_peak": np.nan,
+            "ee_peak": np.nan,
+            "max_tau": np.nan,
+            "torque_ratio": np.nan,
+            "passed": False,
+            "error": repr(exc),
+        }
+
+
+def parse_float_csv(value: str) -> list[float]:
+    return [float(item) for item in value.split(",") if item.strip()]
+
+
+def fmt(value: float) -> str:
+    if np.isnan(value):
+        return "nan"
+    return f"{value:.3f}"
 
 
 def relative_time(times: np.ndarray) -> np.ndarray:
