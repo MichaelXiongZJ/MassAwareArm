@@ -1,4 +1,4 @@
-"""LSPB joint-space trajectories matching the external tracking workflow."""
+"""LSPB joint-space trajectories for the tracking workflow."""
 
 from __future__ import annotations
 
@@ -70,7 +70,7 @@ class JointSegmentTrajectory:
 
 
 class PickWeighTrajectory(JointSegmentTrajectory):
-    """External-style trajectory for pick and weighing only."""
+    """Tracking trajectory for pick and weighing only."""
 
     def __init__(
         self,
@@ -130,7 +130,7 @@ class PickWeighTrajectory(JointSegmentTrajectory):
 
 
 class ReleaseTrajectory(JointSegmentTrajectory):
-    """External-style trajectory from weighing point to release."""
+    """Tracking trajectory from weighing point to release."""
 
     def __init__(
         self,

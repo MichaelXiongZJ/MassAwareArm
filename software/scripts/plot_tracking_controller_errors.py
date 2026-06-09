@@ -24,7 +24,7 @@ if str(SOFTWARE_ROOT) not in sys.path:
 from massaware.classify import classify_mass
 from massaware.config import load_config
 from massaware.controllers.attachment import TrackingAttachment
-from massaware.controllers.ik import make_external_ik
+from massaware.controllers.ik import make_tracking_ik
 from massaware.controllers.profiles import TrackingProfile, tracking_profile
 from massaware.controllers.references import JointReference
 from massaware.controllers.trajectory import JointTrajectory, make_release_trajectory
@@ -70,7 +70,14 @@ class TrackingTrace:
     q_dot: np.ndarray
     q_ref: np.ndarray
     q_dot_ref: np.ndarray
+    # Raw controller torque demand, before actuator ctrlrange clipping.
     tau: np.ndarray
+    tau_clipped: np.ndarray
+    tau_feedback: np.ndarray
+    tau_feedforward: np.ndarray
+    tau_payload: np.ndarray
+    tau_gravity: np.ndarray
+    tau_bias: np.ndarray
     torque_min: np.ndarray
     torque_max: np.ndarray
     stage_transitions: list[tuple[float, str]]
@@ -87,7 +94,7 @@ def parse_args() -> argparse.Namespace:
         choices=["pid_tracking", "inverse_dynamics"],
         default=["pid_tracking", "inverse_dynamics"],
     )
-    parser.add_argument("--profile", choices=["tracking", "external", "main"], default="tracking")
+    parser.add_argument("--profile", choices=["tracking", "main"], default="tracking")
     parser.add_argument("--mass", type=float, default=0.5)
     parser.add_argument("--move-to-grasp-time", type=float, default=3.0)
     parser.add_argument("--lift-to-weigh-time", type=float, default=2.0)
@@ -104,7 +111,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--joint-threshold-deg", type=float, default=2.0)
     parser.add_argument("--ee-threshold-mm", type=float, default=5.0)
-    parser.add_argument("--skip-ee-plots", action="store_true")
+    parser.add_argument(
+        "--include-ee-plots",
+        action="store_true",
+        help="also generate end-effector position/orientation plots",
+    )
+    parser.add_argument(
+        "--skip-ee-plots",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--sweep-payload-limits",
         action="store_true",
@@ -121,10 +137,15 @@ def parse_args() -> argparse.Namespace:
         help="payload sweep pass threshold for peak joint error",
     )
     parser.add_argument(
-        "--limit-ee-peak-mm",
+        "--limit-torque-ratio",
         type=float,
-        default=20.0,
-        help="payload sweep pass threshold for peak end-effector error",
+        default=0.95,
+        help="payload sweep pass threshold for max commanded torque / actuator limit",
+    )
+    parser.add_argument(
+        "--disable-controller-overrides",
+        action="store_true",
+        help="ignore estimator-requested gain overrides during weighing",
     )
     return parser.parse_args()
 
@@ -150,6 +171,7 @@ def main() -> int:
             lift_to_weigh_time=args.lift_to_weigh_time,
             move_to_release_time=release_time(args.move_to_release_time, profile),
             weigh_time=args.weigh_time,
+            allow_controller_overrides=not args.disable_controller_overrides,
         )
         traces[controller_name] = trace
         prefix = output_dir / controller_name
@@ -161,7 +183,7 @@ def main() -> int:
         )
         plot_joint_torques(trace, prefix.with_name(f"{controller_name}_joint_torques.png"))
 
-        if not args.skip_ee_plots:
+        if args.include_ee_plots and not args.skip_ee_plots:
             plot_ee_position(trace, prefix.with_name(f"{controller_name}_ee_position.png"))
             plot_ee_error(
                 trace,
@@ -201,13 +223,21 @@ def run_controller_trace(
     lift_to_weigh_time: float,
     move_to_release_time: float,
     weigh_time: float | None,
+    allow_controller_overrides: bool = True,
 ) -> TrackingTrace:
     env = MujocoEnv()
     env.set_body_mass(CUBE_BODY, mass)
     env.reset(arm_qpos=cfg["poses"]["home_qpos"])
     robot = Robot(env)
     gripper = Gripper(env)
-    controller = make_controller(controller_name, env, robot, cfg, profile)
+    controller = make_controller(
+        controller_name,
+        env,
+        robot,
+        cfg,
+        profile,
+        allow_overrides=allow_controller_overrides,
+    )
     estimator = make_estimator("inverse_dynamics", cfg, profile, controller_name)
 
     cube_xyz = env.data.xpos[env.model.body(CUBE_BODY).id].copy()
@@ -228,6 +258,12 @@ def run_controller_trace(
     q_ref_values: list[np.ndarray] = []
     q_dot_ref_values: list[np.ndarray] = []
     tau_values: list[np.ndarray] = []
+    tau_clipped_values: list[np.ndarray] = []
+    tau_feedback_values: list[np.ndarray] = []
+    tau_feedforward_values: list[np.ndarray] = []
+    tau_payload_values: list[np.ndarray] = []
+    tau_gravity_values: list[np.ndarray] = []
+    tau_bias_values: list[np.ndarray] = []
     actual_positions: list[np.ndarray] = []
     desired_positions: list[np.ndarray] = []
     orientation_errors: list[np.ndarray] = []
@@ -265,7 +301,7 @@ def run_controller_trace(
                     release_approach_xyz = release_approach_target(profile, release_xyz)
                     target_orientation = env.ee_pose()[1]
                     ik_solver = (
-                        make_external_ik(env)
+                        make_tracking_ik(env)
                         if profile.use_analytical_ik
                         else None
                     )
@@ -302,8 +338,9 @@ def run_controller_trace(
             if sample.stage != last_stage:
                 stage_transitions.append((env.data.time, sample.stage))
                 if sample.collect_mass_samples:
-                    controller.apply_overrides(estimator.controller_overrides())
-                    overrides_active = True
+                    overrides_active = controller.apply_overrides(
+                        estimator.controller_overrides()
+                    )
                 elif overrides_active:
                     controller.clear_overrides()
                     overrides_active = False
@@ -345,7 +382,13 @@ def run_controller_trace(
             q_dot_values.append(q_dot)
             q_ref_values.append(sample.q.copy())
             q_dot_ref_values.append(sample.q_dot.copy())
-            tau_values.append(output.tau_cmd.copy())
+            tau_values.append(output.tau_cmd_raw.copy())
+            tau_clipped_values.append(output.tau_cmd_clipped.copy())
+            tau_feedback_values.append(output.tau_feedback.copy())
+            tau_feedforward_values.append(output.tau_feedforward.copy())
+            tau_payload_values.append(output.tau_payload.copy())
+            tau_gravity_values.append(output.tau_gravity.copy())
+            tau_bias_values.append(output.tau_bias.copy())
             actual_positions.append(actual_position)
             desired_positions.append(desired_position)
             orientation_errors.append(
@@ -373,6 +416,12 @@ def run_controller_trace(
         q_ref=np.vstack(q_ref_values),
         q_dot_ref=np.vstack(q_dot_ref_values),
         tau=np.vstack(tau_values),
+        tau_clipped=np.vstack(tau_clipped_values),
+        tau_feedback=np.vstack(tau_feedback_values),
+        tau_feedforward=np.vstack(tau_feedforward_values),
+        tau_payload=np.vstack(tau_payload_values),
+        tau_gravity=np.vstack(tau_gravity_values),
+        tau_bias=np.vstack(tau_bias_values),
         torque_min=actuator_ctrl_limits(env)[0],
         torque_max=actuator_ctrl_limits(env)[1],
         stage_transitions=relative_stage_times(stage_transitions, times[0] if times else 0.0),
@@ -408,8 +457,7 @@ def controller_payload(
 
 
 def actuator_ctrl_limits(env: MujocoEnv) -> tuple[np.ndarray, np.ndarray]:
-    ctrlrange = env.model.actuator_ctrlrange[env._ur5e_ctrl_adr]
-    return ctrlrange[:, 0].copy(), ctrlrange[:, 1].copy()
+    return env.arm_ctrl_limits()
 
 
 def sweep_payload_limits(cfg: dict, profile: TrackingProfile, args: argparse.Namespace) -> None:
@@ -419,7 +467,8 @@ def sweep_payload_limits(cfg: dict, profile: TrackingProfile, args: argparse.Nam
     print(
         "pass criteria: "
         f"joint peak <= {args.limit_joint_peak_deg:.3g} deg, "
-        f"EE peak <= {args.limit_ee_peak_mm:.3g} mm, "
+        f"max |tau|/limit <= {args.limit_torque_ratio:.3g}; "
+        "EE error is reported only, "
         f"payload={args.payload_comp_mode}"
     )
     print(
@@ -482,6 +531,7 @@ def payload_sweep_row(
             lift_to_weigh_time=args.lift_to_weigh_time,
             move_to_release_time=release_time(args.move_to_release_time, profile),
             weigh_time=args.weigh_time,
+            allow_controller_overrides=not args.disable_controller_overrides,
         )
         joint_error_deg = np.rad2deg(trace.q_ref - trace.q)
         ee_error_mm = (trace.desired_position - trace.actual_position) * 1000.0
@@ -492,7 +542,7 @@ def payload_sweep_row(
         torque_ratio = float(np.max(np.abs(trace.tau) / torque_limit))
         passed = (
             joint_peak <= args.limit_joint_peak_deg
-            and ee_peak <= args.limit_ee_peak_mm
+            and torque_ratio <= args.limit_torque_ratio
         )
         return {
             "controller": controller_name,
@@ -632,11 +682,25 @@ def plot_joint_torques(trace: TrackingTrace, output_path: Path) -> None:
     fig, ax = plt.subplots(figsize=(11, 5))
     for joint_index in range(len(trace.joint_names)):
         color = JOINT_COLORS[joint_index % len(JOINT_COLORS)]
-        ax.plot(trace.time, trace.tau[:, joint_index], color=color, linewidth=1.2, label=fr"$\tau_{joint_index + 1}$")
+        ax.plot(
+            trace.time,
+            trace.tau[:, joint_index],
+            color=color,
+            linewidth=1.0,
+            linestyle="--",
+            label=fr"$\tau_{{raw,{joint_index + 1}}}$",
+        )
+        ax.plot(
+            trace.time,
+            trace.tau_clipped[:, joint_index],
+            color=color,
+            linewidth=1.3,
+            label=fr"$\tau_{{clip,{joint_index + 1}}}$",
+        )
         ax.axhline(trace.torque_max[joint_index], linestyle=":", color="gray", linewidth=0.6)
         ax.axhline(trace.torque_min[joint_index], linestyle=":", color="gray", linewidth=0.6)
     mark_stage_transitions(ax, trace)
-    ax.set_title(title(trace, "Joint Torque Commands vs Time"))
+    ax.set_title(title(trace, "Joint Torque Demand/Clipped Command vs Time"))
     ax.set_xlabel("Time [s]")
     ax.set_ylabel("Torque [N-m]")
     ax.legend(ncol=4, fontsize=7)

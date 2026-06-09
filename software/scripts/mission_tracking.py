@@ -18,7 +18,7 @@ if str(SOFTWARE_ROOT) not in sys.path:
 from massaware.classify import classify_mass
 from massaware.config import load_config
 from massaware.controllers.attachment import TrackingAttachment
-from massaware.controllers.ik import make_external_ik
+from massaware.controllers.ik import make_tracking_ik
 from massaware.controllers.profiles import (
     TrackingProfile,
     controller_gains,
@@ -51,7 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--controller", choices=["pid_tracking", "inverse_dynamics"], default="pid_tracking")
     parser.add_argument("--estimator", choices=["pid_error", "lyapunov", "momentum_observer", "inverse_dynamics"], default="lyapunov")
-    parser.add_argument("--profile", choices=["tracking", "external", "main"], default="tracking")
+    parser.add_argument("--profile", choices=["tracking", "main"], default="tracking")
     parser.add_argument("--mass", type=float, default=0.5)
     parser.add_argument("--viewer", action="store_true")
     parser.add_argument("--move-to-grasp-time", type=float, default=3.0)
@@ -60,6 +60,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weigh-time", type=float, default=None)
     parser.add_argument("--calibration-time", type=float, default=3.0)
     parser.add_argument("--start-delay", type=float, default=0.0)
+    parser.add_argument(
+        "--disable-controller-overrides",
+        action="store_true",
+        help="ignore estimator-requested gain overrides during weighing",
+    )
     return parser.parse_args()
 
 
@@ -72,7 +77,14 @@ def main() -> int:
     env.reset(arm_qpos=cfg["poses"]["home_qpos"])
     robot = Robot(env)
     gripper = Gripper(env)
-    controller = make_controller(args.controller, env, robot, cfg, profile)
+    controller = make_controller(
+        args.controller,
+        env,
+        robot,
+        cfg,
+        profile,
+        allow_overrides=not args.disable_controller_overrides,
+    )
     estimator = make_estimator(args.estimator, cfg, profile, args.controller)
 
     cube_xyz = env.data.xpos[env.model.body(CUBE_BODY).id].copy()
@@ -160,6 +172,8 @@ def make_controller(
     robot: Robot,
     cfg: dict,
     profile: TrackingProfile | None = None,
+    *,
+    allow_overrides: bool = True,
 ):
     del cfg
     active_profile = profile
@@ -167,9 +181,22 @@ def make_controller(
         raise ValueError("make_controller requires a tracking profile")
     kp, ki, kd = controller_gains(active_profile, name)
     if name == "pid_tracking":
-        return TrackingPIDController(env, robot, kp=kp, ki=ki, kd=kd)
+        return TrackingPIDController(
+            env,
+            robot,
+            kp=kp,
+            ki=ki,
+            kd=kd,
+            allow_overrides=allow_overrides,
+        )
     if name == "inverse_dynamics":
-        return InverseDynamicsTrackingController(env, robot, kp=kp, kd=kd)
+        return InverseDynamicsTrackingController(
+            env,
+            robot,
+            kp=kp,
+            kd=kd,
+            allow_overrides=allow_overrides,
+        )
     raise ValueError(f"Unknown controller '{name}'")
 
 
@@ -205,7 +232,7 @@ def make_pick_weigh_plan(
     q_home = np.asarray(cfg["poses"]["home_qpos"], dtype=float)
     q_weigh = np.asarray(cfg["poses"]["weigh_qpos"], dtype=float)
     target_orientation = env.ee_pose()[1]
-    ik_solver = make_external_ik(env) if profile.use_analytical_ik else None
+    ik_solver = make_tracking_ik(env) if profile.use_analytical_ik else None
     grasp_xyz = profile.grasp_xyz if profile.grasp_xyz is not None else cube_xyz
     if profile.weigh_xyz is not None:
         q_weigh = solve_ik(
@@ -293,7 +320,7 @@ def run_tracking_mission(
                     release_approach_xyz = release_approach_target(profile, release_xyz)
                     target_orientation = env.ee_pose()[1]
                     ik_solver = (
-                        make_external_ik(env)
+                        make_tracking_ik(env)
                         if profile.use_analytical_ik
                         else None
                     )
@@ -330,8 +357,9 @@ def run_tracking_mission(
             if sample.stage != last_stage:
                 print(f"  [TRACK] stage={sample.stage}")
                 if sample.collect_mass_samples:
-                    controller.apply_overrides(estimator.controller_overrides())
-                    overrides_active = True
+                    overrides_active = controller.apply_overrides(
+                        estimator.controller_overrides()
+                    )
                 elif overrides_active:
                     controller.clear_overrides()
                     overrides_active = False

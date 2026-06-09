@@ -1,4 +1,4 @@
-"""UR5e task-space IK helpers for external-style tracking experiments."""
+"""UR5e task-space IK helpers for tracking experiments."""
 
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ class RobotIKAdapter:
 
 
 class UR5eAnalyticalIK:
-    """Full-pose UR5e analytical IK matching the external tracking scripts."""
+    """Full-pose UR5e analytical IK for tracking scripts."""
 
     D1 = 0.163
     A2 = -0.425
@@ -287,7 +287,7 @@ class UR5eAnalyticalIK:
         return solutions
 
 
-def make_external_ik(env: MujocoEnv) -> UR5eAnalyticalIK:
+def make_tracking_ik(env: MujocoEnv) -> UR5eAnalyticalIK:
     return UR5eAnalyticalIK(RobotIKAdapter(env))
 
 

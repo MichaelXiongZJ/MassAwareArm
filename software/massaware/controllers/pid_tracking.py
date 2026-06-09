@@ -21,8 +21,17 @@ class TrackingPIDController(TrackingControllerBase):
         ki: np.ndarray | list[float],
         kd: np.ndarray | list[float],
         gravity: float = 9.81,
+        allow_overrides: bool = True,
     ) -> None:
-        super().__init__(env, robot, kp=kp, ki=ki, kd=kd, gravity=gravity)
+        super().__init__(
+            env,
+            robot,
+            kp=kp,
+            ki=ki,
+            kd=kd,
+            gravity=gravity,
+            allow_overrides=allow_overrides,
+        )
         self.integral_error = np.zeros_like(self.kp)
 
     def reset(self) -> None:
@@ -44,17 +53,23 @@ class TrackingPIDController(TrackingControllerBase):
             + self.kd * q_dot_error
         )
         gravity_mask = self.gravity_compensation_mask(gravity_mask, q)
-        tau_feedforward = self.env.qfrc_bias * gravity_mask
+        tau_gravity = self.env.gravity_torque(q) * gravity_mask
+        tau_feedforward = tau_gravity
         tau_payload = self.payload_compensation(payload_mass)
         tau_nominal = tau_feedback + tau_feedforward
-        tau_cmd = tau_nominal + tau_payload
-        self.env.set_arm_ctrl(tau_cmd)
+        tau_cmd_raw = tau_nominal + tau_payload
+        tau_cmd_clipped = self.env.set_arm_ctrl(tau_cmd_raw)
 
         return ControlOutput(
-            tau_cmd=tau_cmd.copy(),
+            tau_cmd=tau_cmd_clipped.copy(),
+            tau_cmd_raw=tau_cmd_raw.copy(),
+            tau_cmd_clipped=tau_cmd_clipped.copy(),
+            tau_feedback=tau_feedback.copy(),
             tau_feedforward=tau_feedforward.copy(),
             tau_nominal=tau_nominal.copy(),
             tau_payload=tau_payload.copy(),
+            tau_gravity=tau_gravity.copy(),
+            tau_bias=tau_gravity.copy(),
             q_error=q_error,
             q_dot_error=q_dot_error,
         )

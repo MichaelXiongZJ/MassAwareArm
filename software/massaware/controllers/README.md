@@ -1,144 +1,122 @@
-# Tracking Controller Additions
+# Tracking Controllers
 
-This folder contains the added trajectory-tracking controller workflow. It is
-kept separate from the original `massaware/controller.py`, planner, config, and
-mission files so it can be copied into another main branch with minimal changes.
+This package contains the joint-space tracking controllers and helper code used
+by the controller comparison scripts. It is separate from the original
+`massaware/controller.py` pipeline.
 
-## Added Files
-
-Controller package:
+## Files
 
 ```text
 software/massaware/controllers/
-  __init__.py
-  attachment.py
-  ik.py
-  inverse_dynamics_tracking.py
-  pid_tracking.py
-  profiles.py
-  references.py
-  trajectory.py
+  base.py                         shared gains, errors, overrides, payload comp.
+  pid_tracking.py                 PD/PID + gravity + payload compensation
+  inverse_dynamics_tracking.py    computed-torque tracking controller
+  references.py                   reference/output dataclasses
+  trajectory.py                   pick-weigh-release joint trajectories
+  ik.py                           UR5e IK helper
+  attachment.py                   payload attachment force model
+  profiles.py                     tracking profiles and controller gains
 ```
 
-Estimator addition:
+## Controllers
+
+PID tracking:
 
 ```text
-software/massaware/estimators/inverse_dynamics.py
+u = Kp(qd - q) + Ki∫(qd - q)dt + Kd(qdot_d - qdot)
+  + tau_g(q) + tau_p(q, m_hat)
 ```
 
-Scripts:
+Inverse dynamics tracking:
 
 ```text
-software/scripts/mission_inverse_dynamics_estimator.py
-software/scripts/mission_tracking.py
-software/scripts/compare_tracking_controllers.py
-software/scripts/plot_tracking_controller_errors.py
+qddot_cmd = qddot_d + Kd(qdot_d - qdot) + Kp(qd - q)
+u = M(q)qddot_cmd + n(q, qdot) + tau_p(q, m_hat)
 ```
 
-## What Each Script Does
-
-`mission_inverse_dynamics_estimator.py`
-
-Runs the original main mission pipeline while registering and defaulting to the
-`inverse_dynamics` estimator. This is for testing the ID estimator in the
-original main control flow.
-
-`mission_tracking.py`
-
-Runs the new trajectory-tracking workflow. It supports:
+Payload compensation is gravity-only:
 
 ```text
-controllers: pid_tracking, inverse_dynamics
-estimators:  pid_error, lyapunov, momentum_observer, inverse_dynamics
-profiles:    tracking, main
+tau_p(q, m_hat) = J(q)^T [0, 0, m_hat g]^T
 ```
 
-`compare_tracking_controllers.py`
-
-Runs batch comparisons over controller, estimator, and mass combinations.
-
-`plot_tracking_controller_errors.py`
-
-Plots controller tracking performance: joint angles, joint errors, torques,
-end-effector position, end-effector error, and orientation error.
-
-## Profiles
-
-`--profile tracking`
-
-Uses the external tracking-controller style setup:
+Controller outputs distinguish raw torque demand from actuator-limited command:
 
 ```text
-kp/kd: external tracking gains
-IK: analytical IK
-task waypoints: fixed grasp/weigh/release points
-sampling: lift_to_weigh + weigh_hold
-release: payload compensation enabled after mass estimate
+tau_cmd_raw      controller torque demand
+tau_cmd_clipped  command after actuator ctrlrange clipping
+tau_cmd          alias for tau_cmd_clipped
 ```
 
-`--profile main`
+## Payload Timing
 
-Uses main's default gains, main bin positions, position-only IK, and weigh-hold
-sampling.
-
-## Merge Into Another Main Branch
-
-From the target main branch, copy these files:
+Payload compensation is disabled before and during weighing. After weighing,
+release motion uses the estimated mass, or the true mass in oracle experiments.
 
 ```text
-software/massaware/controllers/
-software/massaware/estimators/inverse_dynamics.py
-software/scripts/mission_inverse_dynamics_estimator.py
-software/scripts/mission_tracking.py
-software/scripts/compare_tracking_controllers.py
-software/scripts/plot_tracking_controller_errors.py
+pick / lift / weigh_hold: no payload compensation
+release motion: payload compensation enabled
+release after opening: no payload compensation
 ```
 
-Do not overwrite original main files unless needed. These additions are designed
-to work by importing/registering the new estimator inside the new scripts.
-
-## Test Commands
-
-Run from the project root:
+Estimator-requested gain overrides can be disabled with:
 
 ```bash
-python -m py_compile software/massaware/controllers/*.py software/massaware/estimators/inverse_dynamics.py software/scripts/mission_inverse_dynamics_estimator.py software/scripts/mission_tracking.py software/scripts/compare_tracking_controllers.py software/scripts/plot_tracking_controller_errors.py
+--disable-controller-overrides
 ```
 
-Single tracking smoke test:
+## Main Commands
+
+Controller tracking plots, using oracle payload mass and fixed controller gains:
 
 ```bash
-python software/scripts/mission_tracking.py --controller inverse_dynamics --estimator inverse_dynamics --mass 0.5 --profile tracking
+.env/bin/python software/scripts/plot_tracking_controller_errors.py \
+  --payload-comp-mode oracle \
+  --disable-controller-overrides
 ```
 
-Small controller-estimator matrix:
+Include end-effector plots only when needed:
 
 ```bash
-python software/scripts/compare_tracking_controllers.py --profile tracking --masses 0.5
+.env/bin/python software/scripts/plot_tracking_controller_errors.py \
+  --include-ee-plots
 ```
 
-Mass sweep:
+Payload sweep with joint tracking and torque-limit pass/fail:
 
 ```bash
-python software/scripts/compare_tracking_controllers.py --profile tracking --masses 0.1,0.5,1.0,2.0,5.0,10.0
+.env/bin/python software/scripts/sweep_tracking_payload_limits.py \
+  --payload-comp-mode oracle \
+  --disable-controller-overrides
 ```
 
-Controller error plots:
+Full controller/estimator matrix:
 
 ```bash
-python software/scripts/plot_tracking_controller_errors.py --mass 0.5 --profile tracking
+.env/bin/python software/scripts/compare_tracking_controllers.py \
+  --profile tracking \
+  --masses 0.5
 ```
 
 Viewer:
 
 ```bash
-python software/scripts/mission_tracking.py --viewer --controller inverse_dynamics --estimator inverse_dynamics --mass 0.5 --profile tracking
+.env/bin/python software/scripts/mission_tracking.py \
+  --viewer \
+  --controller inverse_dynamics \
+  --estimator inverse_dynamics \
+  --mass 0.5 \
+  --profile tracking
 ```
 
-Original main flow with inverse-dynamics estimator:
+## Metrics
 
-```bash
-python software/scripts/mission_inverse_dynamics_estimator.py --mass 0.5
+For joint-space controller comparisons, pass/fail uses:
+
+```text
+joint peak error <= 2 deg
+max |tau_cmd_raw| / actuator_limit <= 0.95
 ```
 
-If the environment only has `python3`, replace `python` with `python3`.
+End-effector error is reported as a diagnostic, not used as the default
+pass/fail criterion.

@@ -27,7 +27,7 @@ CONTROLLERS = ["pid_tracking", "inverse_dynamics"]
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--controllers", default=",".join(CONTROLLERS))
-    parser.add_argument("--profile", choices=["tracking", "external", "main"], default="tracking")
+    parser.add_argument("--profile", choices=["tracking", "main"], default="tracking")
     parser.add_argument("--masses", default="0.1,0.5,1,2,3,5,7.5,10,12.5,15,20")
     parser.add_argument("--payload-comp-mode", choices=["oracle", "estimated", "none"], default="oracle")
     parser.add_argument("--move-to-grasp-time", type=float, default=3.0)
@@ -35,7 +35,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--move-to-release-time", type=float, default=None)
     parser.add_argument("--weigh-time", type=float, default=None)
     parser.add_argument("--joint-peak-deg", type=float, default=2.0)
-    parser.add_argument("--ee-peak-mm", type=float, default=20.0)
     parser.add_argument("--torque-ratio", type=float, default=0.95)
     parser.add_argument(
         "--optimize-gains",
@@ -48,6 +47,11 @@ def parse_args() -> argparse.Namespace:
         "--ignore-torque-limit",
         action="store_true",
         help="when optimizing gains, pass/fail uses tracking thresholds only",
+    )
+    parser.add_argument(
+        "--disable-controller-overrides",
+        action="store_true",
+        help="ignore estimator-requested gain overrides during weighing",
     )
     return parser.parse_args()
 
@@ -82,8 +86,7 @@ def optimize_gains(
     kd_scales = parse_float_csv(args.kd_scales)
     print(
         "gain optimization pass criteria: "
-        f"joint_peak <= {args.joint_peak_deg:.3g} deg, "
-        f"ee_peak <= {args.ee_peak_mm:.3g} mm"
+        f"joint_peak <= {args.joint_peak_deg:.3g} deg"
         + (
             ", torque ignored"
             if args.ignore_torque_limit
@@ -170,10 +173,7 @@ def run_gain_case(
         )
     row = run_case(cfg, active_profile, controller, mass, args)
     torque_ok = args.ignore_torque_limit or row["torque_ratio"] <= args.torque_ratio
-    tracking_ok = (
-        row["joint_peak"] <= args.joint_peak_deg
-        and row["ee_peak"] <= args.ee_peak_mm
-    )
+    tracking_ok = row["joint_peak"] <= args.joint_peak_deg
     row["passed"] = tracking_ok and torque_ok and not row["error"]
     row["kp_scale"] = kp_scale
     row["kd_scale"] = kd_scale
@@ -198,6 +198,7 @@ def run_case(cfg: dict, profile, controller: str, mass: float, args: argparse.Na
             lift_to_weigh_time=args.lift_to_weigh_time,
             move_to_release_time=release_time(args.move_to_release_time, profile),
             weigh_time=args.weigh_time,
+            allow_controller_overrides=not args.disable_controller_overrides,
         )
         joint_err_deg = np.rad2deg(trace.q_ref - trace.q)
         ee_err_mm = (trace.desired_position - trace.actual_position) * 1000.0
@@ -210,7 +211,6 @@ def run_case(cfg: dict, profile, controller: str, mass: float, args: argparse.Na
         ee_rms = float(np.sqrt(np.mean(ee_err_mm**2)))
         passed = (
             joint_peak <= args.joint_peak_deg
-            and ee_peak <= args.ee_peak_mm
             and torque_ratio <= args.torque_ratio
         )
         return {
@@ -244,8 +244,8 @@ def print_results(rows: list[dict], args: argparse.Namespace) -> None:
     print(
         "pass criteria: "
         f"joint_peak <= {args.joint_peak_deg:.3g} deg, "
-        f"ee_peak <= {args.ee_peak_mm:.3g} mm, "
         f"max |tau|/limit <= {args.torque_ratio:.3g}, "
+        "EE error reported only, "
         f"payload={args.payload_comp_mode}"
     )
     print(

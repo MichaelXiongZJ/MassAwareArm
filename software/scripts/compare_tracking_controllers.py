@@ -40,12 +40,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--controllers", default=",".join(CONTROLLERS))
     parser.add_argument("--estimators", default=",".join(ESTIMATORS))
     parser.add_argument("--masses", default=",".join(str(m) for m in MASSES))
-    parser.add_argument("--profile", choices=["tracking", "external", "main"], default="tracking")
+    parser.add_argument("--profile", choices=["tracking", "main"], default="tracking")
     parser.add_argument("--move-to-grasp-time", type=float, default=3.0)
     parser.add_argument("--lift-to-weigh-time", type=float, default=2.0)
     parser.add_argument("--move-to-release-time", type=float, default=None)
     parser.add_argument("--weigh-time", type=float, default=None)
     parser.add_argument("--calibration-time", type=float, default=3.0)
+    parser.add_argument(
+        "--disable-controller-overrides",
+        action="store_true",
+        help="ignore estimator-requested gain overrides during weighing/calibration",
+    )
     return parser.parse_args()
 
 
@@ -75,6 +80,7 @@ def main() -> int:
                         move_to_release_time=args.move_to_release_time,
                         weigh_time=args.weigh_time,
                         calibration_time=args.calibration_time,
+                        allow_controller_overrides=not args.disable_controller_overrides,
                     )
                 )
 
@@ -98,6 +104,7 @@ def run_trial(
     move_to_release_time: float | None,
     weigh_time: float | None,
     calibration_time: float,
+    allow_controller_overrides: bool,
 ) -> dict:
     try:
         env = MujocoEnv()
@@ -106,7 +113,14 @@ def run_trial(
         robot = Robot(env)
         gripper = Gripper(env)
         profile = tracking_profile(profile_name, cfg)
-        controller = make_controller(controller_name, env, robot, cfg, profile)
+        controller = make_controller(
+            controller_name,
+            env,
+            robot,
+            cfg,
+            profile,
+            allow_overrides=allow_controller_overrides,
+        )
         estimator = make_estimator(estimator_name, cfg, profile, controller_name)
 
         if estimator.requires_calibration:

@@ -50,7 +50,7 @@ TRACKING_PROFILE = TrackingProfile(
 
 
 def tracking_profile(name: str, cfg: dict) -> TrackingProfile:
-    if name in {"tracking", "external"}:
+    if name == "tracking":
         return TRACKING_PROFILE
     if name != "main":
         raise ValueError(f"Unknown tracking profile '{name}'")

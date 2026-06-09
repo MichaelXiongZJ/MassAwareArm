@@ -20,12 +20,14 @@ class TrackingControllerBase:
         kd: np.ndarray | list[float],
         gravity: float = 9.81,
         ki: np.ndarray | list[float] | None = None,
+        allow_overrides: bool = True,
     ) -> None:
         self.env = env
         self.robot = robot
         self.kp = np.asarray(kp, dtype=float)
         self.kd = np.asarray(kd, dtype=float)
         self.gravity = float(gravity)
+        self.allow_overrides = bool(allow_overrides)
         self._base_gains = {
             "kp": self.kp.copy(),
             "kd": self.kd.copy(),
@@ -37,15 +39,17 @@ class TrackingControllerBase:
     def reset(self) -> None:
         pass
 
-    def apply_overrides(self, overrides: dict) -> None:
+    def apply_overrides(self, overrides: dict) -> bool:
+        if not self.allow_overrides or not overrides:
+            return False
         for key, value in overrides.items():
             if key not in self._base_gains:
                 if key == "ki":
                     continue
                 raise KeyError(f"Unknown controller gain override '{key}'")
             setattr(self, key, np.asarray(value, dtype=float))
-        if overrides:
-            self.reset()
+        self.reset()
+        return True
 
     def clear_overrides(self) -> None:
         for key, value in self._base_gains.items():
