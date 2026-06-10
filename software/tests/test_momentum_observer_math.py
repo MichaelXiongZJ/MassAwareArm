@@ -19,7 +19,7 @@ def _make(K_O: float = 50.0, burn_in_s: float = 0.05) -> MomentumObserver:
     })
 
 
-def _obs(t: float, q_dot=None, tau_cmd=None, qfrc_bias=None, J_z=None) -> EstimatorObs:
+def _obs(t: float, q_dot=None, tau_cmd=None, qfrc_bias=None, J_z=None, M=None) -> EstimatorObs:
     return EstimatorObs(
         t=t,
         q=np.zeros(6),
@@ -33,7 +33,7 @@ def _obs(t: float, q_dot=None, tau_cmd=None, qfrc_bias=None, J_z=None) -> Estima
         ),
         q_ref=np.zeros(6),
         ee_xyz=np.zeros(3),
-        M=np.eye(6),
+        M=np.eye(6) if M is None else np.asarray(M, dtype=float),
     )
 
 
@@ -60,6 +60,29 @@ def test_residual_stays_near_zero_without_disturbance():
     for k in range(500):  # 1 s
         obs.update(_obs(k * dt))
     assert np.max(np.abs(obs._r)) < 1e-6
+
+
+def test_residual_tracks_disturbance_with_time_varying_mass_matrix():
+    """Constant external disturbance while M(t) varies and q_dot != 0 — i.e.
+    the arm is moving. The Mdot*q_dot correction must keep the residual locked
+    on the disturbance instead of leaking the momentum change into it.
+
+    Synthetic consistency: with q_dot constant, p = M(t) q_dot gives
+    p_dot = Mdot q_dot exactly, so the exact dynamics
+    p_dot = tau + tau_ext + Mdot q_dot - qfrc_bias require tau = -tau_ext
+    (qfrc_bias = 0) for a disturbance tau_ext = D.
+    """
+    obs = _make(K_O=50.0)
+    D = np.array([0.0, 2.0, 0.0, 1.0, 0.0, 0.0])
+    q_dot = np.full(6, 0.3)
+    dt = 0.002
+    for k in range(int(0.50 / dt)):
+        t = k * dt
+        scale = 1.0 + 0.5 * np.sin(2.0 * np.pi * t)  # 1 Hz inertia swing
+        obs.update(_obs(t, q_dot=q_dot, tau_cmd=-D, M=scale * np.eye(6)))
+    # Without the correction the residual would carry the Mdot*q_dot term
+    # (~0.9 N*m amplitude here); with it, r stays pinned to D.
+    assert np.allclose(obs._r, D, atol=5e-2)
 
 
 def test_burn_in_skips_initial_samples():
@@ -157,6 +180,40 @@ def test_calibration_baseline_subtracts_cleanly():
         obs._jz_samples.append(np.array([0, 0.5, 0.4, 0, 0, 0]))
     result = obs.estimate()
     assert result.m_hat == pytest.approx(0.0, abs=1e-12)
+
+
+def test_varying_jacobian_per_sample_fit_recovers_mass():
+    """r_k = -m g J_z,k with J_z changing across samples (a moving pose):
+    the sample-wise least squares must recover m exactly."""
+    obs = _make()
+    obs.load_calibration({"r_empty": [0.0] * 6})
+    m_true = 0.4
+    rng = np.random.default_rng(0)
+    for _ in range(60):
+        J = rng.uniform(-0.5, 0.5, size=6)
+        obs._r_samples.append(-m_true * GRAVITY * J)
+        obs._jz_samples.append(J)
+    result = obs.estimate()
+    assert result.m_hat == pytest.approx(m_true, abs=1e-10)
+
+
+def test_per_sample_fit_gates_blind_poses():
+    """Samples taken at poses with no vertical leverage carry no mass signal.
+    The fit must skip them instead of letting their residual (e.g. unmodelled
+    wrist bias) contaminate the estimate, which the old mean-then-project did."""
+    obs = _make()
+    obs.load_calibration({"r_empty": [0.0] * 6})
+    m_true = 0.8
+    J_good = np.array([0.0, 0.49, 0.39, 0.0, 0.0, 0.0])
+    for _ in range(40):
+        obs._r_samples.append(-m_true * GRAVITY * J_good)
+        obs._jz_samples.append(J_good.copy())
+    for _ in range(40):
+        obs._r_samples.append(np.array([0.0, 3.0, -2.0, 1.0, 0.0, 0.0]))
+        obs._jz_samples.append(np.zeros(6))
+    result = obs.estimate()
+    assert result.m_hat == pytest.approx(m_true, abs=1e-9)
+    assert result.diagnostics["n_rejected"] == 40
 
 
 # ---------- Hooks and metadata ----------

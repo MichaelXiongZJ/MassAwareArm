@@ -38,7 +38,8 @@ from scripts.mission import build
 # Multiplicative steps give automatic density at the light end (where the
 # sag-based method's noise floor lives) without losing coverage of the heavy
 # edge. The ratio between successive trials is about 1.26x.
-M_MIN, M_MAX, N_MASSES = 0.01, 3, 20
+# M_MIN, M_MAX, N_MASSES = 0.01, 3, 20
+M_MIN, M_MAX, N_MASSES = 1, 1, 1
 DEFAULT_MASSES: list[float] = [
     round(float(m), 4) for m in np.geomspace(M_MIN, M_MAX, num=N_MASSES) # log
     # round(float(m), 4) for m in np.linspace(M_MIN, M_MAX, num=N_MASSES) # linear
@@ -71,7 +72,7 @@ def _drive(env, ctx, controller, gripper, fsm, viewer=None) -> None:
             dt=env.dt,
             use_gravity_comp=False,
         ) + qb * ctx.gravity_comp_mask
-        env.set_arm_ctrl(tau)
+        tau = env.set_arm_ctrl(tau)  # keep the clipped command for the estimator obs
         gripper.apply(ctx.gripper_cmd)
         t0 = time.perf_counter() if viewer is not None else 0.0
         mujoco.mj_step(env.model, env.data)

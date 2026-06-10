@@ -61,6 +61,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--calibration-time", type=float, default=3.0)
     parser.add_argument("--start-delay", type=float, default=0.0)
     parser.add_argument(
+        "--collect-lift-samples",
+        action="store_true",
+        help="feed the estimator during the lift-to-weigh motion (pause-free weighing); "
+        "combine with --weigh-time to shrink the stationary hold",
+    )
+    parser.add_argument(
         "--disable-controller-overrides",
         action="store_true",
         help="ignore estimator-requested gain overrides during weighing",
@@ -97,6 +103,7 @@ def main() -> int:
         move_to_grasp_time=args.move_to_grasp_time,
         lift_to_weigh_time=args.lift_to_weigh_time,
         weigh_time=args.weigh_time,
+        collect_lift_samples=True if args.collect_lift_samples else None,
     )
 
     if estimator.requires_calibration:
@@ -119,6 +126,7 @@ def main() -> int:
             move_to_grasp_time=args.move_to_grasp_time,
             lift_to_weigh_time=args.lift_to_weigh_time,
             weigh_time=args.weigh_time,
+            collect_lift_samples=True if args.collect_lift_samples else None,
         )
 
     print(
@@ -228,6 +236,7 @@ def make_pick_weigh_plan(
     move_to_grasp_time: float,
     lift_to_weigh_time: float,
     weigh_time: float | None,
+    collect_lift_samples: bool | None = None,
 ) -> JointTrajectory:
     q_home = np.asarray(cfg["poses"]["home_qpos"], dtype=float)
     q_weigh = np.asarray(cfg["poses"]["weigh_qpos"], dtype=float)
@@ -264,7 +273,11 @@ def make_pick_weigh_plan(
             else max(float(cfg["weigh"]["hold_seconds"]), profile.weigh_hold_time_min)
         ),
         blend_time_fraction=profile.blend_time_fraction,
-        collect_lift_samples=profile.collect_lift_samples,
+        collect_lift_samples=(
+            profile.collect_lift_samples
+            if collect_lift_samples is None
+            else collect_lift_samples
+        ),
     )
 
 

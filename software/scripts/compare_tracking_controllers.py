@@ -51,6 +51,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="ignore estimator-requested gain overrides during weighing/calibration",
     )
+    parser.add_argument(
+        "--collect-lift-samples",
+        action="store_true",
+        help="feed estimators during the lift-to-weigh motion (pause-free weighing)",
+    )
     return parser.parse_args()
 
 
@@ -81,6 +86,7 @@ def main() -> int:
                         weigh_time=args.weigh_time,
                         calibration_time=args.calibration_time,
                         allow_controller_overrides=not args.disable_controller_overrides,
+                        collect_lift_samples=True if args.collect_lift_samples else None,
                     )
                 )
 
@@ -105,6 +111,7 @@ def run_trial(
     weigh_time: float | None,
     calibration_time: float,
     allow_controller_overrides: bool,
+    collect_lift_samples: bool | None = None,
 ) -> dict:
     try:
         env = MujocoEnv()
@@ -145,6 +152,7 @@ def run_trial(
             move_to_grasp_time=move_to_grasp_time,
             lift_to_weigh_time=lift_to_weigh_time,
             weigh_time=weigh_time,
+            collect_lift_samples=collect_lift_samples,
         )
         result = run_tracking_mission(
             env,

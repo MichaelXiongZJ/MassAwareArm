@@ -22,7 +22,8 @@ estimator:
     # No estimator-specific config; uses controller.kp + calibration data.
   momentum_observer:
     K_O: 50.0                            # observer gain, 1/s (time constant 1/K_O)
-    burn_in_s: 0.5                       # skip this much of the hold before averaging
+    burn_in_s: 0.5                       # skip this much of the sampling window before fitting
+    min_leverage: 1.0e-6                 # per-sample gate on ||J_z||^2 (skips blind poses)
 
 classifier:
   mass_threshold: 0.35                   # kg — boundary between "light" and "heavy"
