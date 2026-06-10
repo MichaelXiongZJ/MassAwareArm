@@ -27,6 +27,12 @@ CONTROLLERS = ["pid_tracking", "inverse_dynamics"]
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--controllers", default=",".join(CONTROLLERS))
+    parser.add_argument(
+        "--estimators",
+        default="inverse_dynamics",
+        help="comma-separated estimators to keep in the weighing loop during the sweep; "
+        "each estimator's gain overrides and gravity-comp mask are active while it samples",
+    )
     parser.add_argument("--profile", choices=["tracking", "main"], default="tracking")
     parser.add_argument("--masses", default="0.1,0.5,1,2,3,5,7.5,10,12.5,15,20")
     parser.add_argument("--payload-comp-mode", choices=["oracle", "estimated", "none"], default="oracle")
@@ -61,6 +67,7 @@ def main() -> int:
     cfg = load_config()
     profile = tracking_profile(args.profile, cfg)
     controllers = parse_csv(args.controllers)
+    estimators = parse_csv(args.estimators)
     masses = parse_float_csv(args.masses)
     if args.optimize_gains:
         optimize_gains(cfg, profile, controllers, masses, args)
@@ -68,10 +75,15 @@ def main() -> int:
     rows = []
 
     for controller in controllers:
-        for mass in masses:
-            rows.append(run_case(cfg, profile, controller, mass, args))
+        for estimator in estimators:
+            for mass in masses:
+                print(f">>> controller={controller} estimator={estimator} mass={mass:g}kg")
+                rows.append(
+                    run_case(cfg, profile, controller, mass, args, estimator_name=estimator)
+                )
 
     print_results(rows, args)
+    write_csv(rows, args)
     return 0
 
 
@@ -186,7 +198,14 @@ def run_gain_case(
     return row
 
 
-def run_case(cfg: dict, profile, controller: str, mass: float, args: argparse.Namespace) -> dict:
+def run_case(
+    cfg: dict,
+    profile,
+    controller: str,
+    mass: float,
+    args: argparse.Namespace,
+    estimator_name: str = "inverse_dynamics",
+) -> dict:
     try:
         trace = run_controller_trace(
             cfg,
@@ -199,12 +218,28 @@ def run_case(cfg: dict, profile, controller: str, mass: float, args: argparse.Na
             move_to_release_time=release_time(args.move_to_release_time, profile),
             weigh_time=args.weigh_time,
             allow_controller_overrides=not args.disable_controller_overrides,
+            estimator_name=estimator_name,
         )
-        joint_err_deg = np.rad2deg(trace.q_ref - trace.q)
-        ee_err_mm = (trace.desired_position - trace.actual_position) * 1000.0
+        # Score only the carry portion of the mission (everything before the
+        # 'release' stage). When the attachment detaches it re-enables cube
+        # collision while the cube still overlaps the gripper pads; the contact
+        # impulse produces a one-tick torque/error spike that says nothing
+        # about how much payload the controller can carry.
+        release_start = next(
+            (t for t, stage in trace.stage_transitions if stage == "release"),
+            None,
+        )
+        carry = (
+            trace.time < release_start
+            if release_start is not None
+            else np.ones_like(trace.time, dtype=bool)
+        )
+        joint_err_deg = np.rad2deg(trace.q_ref - trace.q)[carry]
+        ee_err_mm = ((trace.desired_position - trace.actual_position) * 1000.0)[carry]
+        tau = trace.tau[carry]
         torque_limit = np.maximum(np.abs(trace.torque_min), np.abs(trace.torque_max))
-        max_tau = float(np.max(np.abs(trace.tau)))
-        torque_ratio = np.max(np.abs(trace.tau) / torque_limit)
+        max_tau = float(np.max(np.abs(tau)))
+        torque_ratio = np.max(np.abs(tau) / torque_limit)
         joint_peak = float(np.max(np.abs(joint_err_deg)))
         joint_rms = float(np.sqrt(np.mean(joint_err_deg**2)))
         ee_peak = float(np.max(np.linalg.norm(ee_err_mm, axis=1)))
@@ -215,6 +250,7 @@ def run_case(cfg: dict, profile, controller: str, mass: float, args: argparse.Na
         )
         return {
             "controller": controller,
+            "estimator": estimator_name,
             "mass": mass,
             "joint_rms": joint_rms,
             "joint_peak": joint_peak,
@@ -228,6 +264,7 @@ def run_case(cfg: dict, profile, controller: str, mass: float, args: argparse.Na
     except Exception as exc:
         return {
             "controller": controller,
+            "estimator": estimator_name,
             "mass": mass,
             "joint_rms": math.nan,
             "joint_peak": math.nan,
@@ -246,19 +283,20 @@ def print_results(rows: list[dict], args: argparse.Namespace) -> None:
         f"joint_peak <= {args.joint_peak_deg:.3g} deg, "
         f"max |tau|/limit <= {args.torque_ratio:.3g}, "
         "EE error reported only, "
-        f"payload={args.payload_comp_mode}"
+        f"payload={args.payload_comp_mode} "
+        "(metrics scored through the carry phases; release detach excluded)"
     )
     print(
-        f"{'controller':<18} {'mass':>7} {'joint_rms':>10} {'joint_peak':>11} "
-        f"{'ee_rms':>10} {'ee_peak':>10} {'tau/lim':>9} {'status':>8}"
+        f"{'controller':<18} {'estimator':<18} {'mass':>7} {'joint_rms':>10} "
+        f"{'joint_peak':>11} {'ee_rms':>10} {'ee_peak':>10} {'tau/lim':>9} {'status':>8}"
     )
-    print("-" * 95)
+    print("-" * 114)
     for row in rows:
         status = "PASS" if row["passed"] else "FAIL"
         if row["error"]:
             status = "ERROR"
         print(
-            f"{row['controller']:<18} {row['mass']:>7.3f} "
+            f"{row['controller']:<18} {row['estimator']:<18} {row['mass']:>7.3f} "
             f"{fmt(row['joint_rms']):>10} {fmt(row['joint_peak']):>11} "
             f"{fmt(row['ee_rms']):>10} {fmt(row['ee_peak']):>10} "
             f"{fmt(row['torque_ratio']):>9} {status:>8}"
@@ -266,14 +304,48 @@ def print_results(rows: list[dict], args: argparse.Namespace) -> None:
         )
 
     print("\nEstimated payload limit from sampled masses:")
-    for controller in sorted({row["controller"] for row in rows}):
+    pairs = sorted({(row["controller"], row["estimator"]) for row in rows})
+    for controller, estimator in pairs:
         passed = [
             row["mass"]
             for row in rows
-            if row["controller"] == controller and row["passed"]
+            if row["controller"] == controller
+            and row["estimator"] == estimator
+            and row["passed"]
         ]
         limit = max(passed) if passed else None
-        print(f"  {controller:<18} {limit if limit is not None else 'none'} kg")
+        print(f"  {controller:<18} {estimator:<18} {limit if limit is not None else 'none'} kg")
+
+
+def write_csv(rows: list[dict], args: argparse.Namespace) -> None:
+    """Append the per-trial rows to a timestamped CSV under <repo>/results/."""
+    import csv
+    import time
+
+    results_dir = Path(__file__).resolve().parents[2] / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+    csv_path = results_dir / f"payload_limits_{stamp}.csv"
+    with open(csv_path, "w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow([
+            "controller", "estimator", "payload_comp_mode", "profile",
+            "true_mass_kg", "joint_rms_deg", "joint_peak_deg",
+            "ee_rms_mm", "ee_peak_mm", "max_tau_nm", "torque_ratio",
+            "joint_peak_criterion_deg", "torque_ratio_criterion",
+            "passed", "error",
+        ])
+        for row in rows:
+            writer.writerow([
+                row["controller"], row["estimator"], args.payload_comp_mode,
+                args.profile, row["mass"],
+                f"{row['joint_rms']:.6f}", f"{row['joint_peak']:.6f}",
+                f"{row['ee_rms']:.6f}", f"{row['ee_peak']:.6f}",
+                f"{row['max_tau']:.6f}", f"{row['torque_ratio']:.6f}",
+                args.joint_peak_deg, args.torque_ratio,
+                int(row["passed"]), row["error"],
+            ])
+    print(f"\nwrote {csv_path} ({len(rows)} rows)")
 
 
 def fmt(value: float) -> str:

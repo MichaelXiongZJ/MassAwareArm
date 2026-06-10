@@ -20,6 +20,12 @@ estimator:
     moment_arm: 0.492                    # m, computed once via FK at weigh_qpos; hand-tuned in YAML for now
   lyapunov:
     # No estimator-specific config; uses controller.kp + calibration data.
+  inverse_dynamics:
+    # Velocity gate on accepted samples. The default 0.35 rejects everything at
+    # the FSM weigh hold with very light cubes: full-force grasp on a ~10 g cube
+    # excites zero-mean contact chatter at ~0.38 rad/s across the arm. The
+    # chatter averages out of the residual fit, so admit it.
+    max_q_dot_norm: 0.6
   momentum_observer:
     K_O: 50.0                            # observer gain, 1/s (time constant 1/K_O)
     burn_in_s: 0.5                       # skip this much of the sampling window before fitting

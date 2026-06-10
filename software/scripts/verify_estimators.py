@@ -30,6 +30,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from massaware.estimators import inverse_dynamics as _inverse_dynamics  # noqa: F401  (registration)
 from massaware.planner import FSM
 from massaware.tick_loop import Gripper, _build_obs
 from scripts.mission import build
@@ -38,13 +39,17 @@ from scripts.mission import build
 # Multiplicative steps give automatic density at the light end (where the
 # sag-based method's noise floor lives) without losing coverage of the heavy
 # edge. The ratio between successive trials is about 1.26x.
-# M_MIN, M_MAX, N_MASSES = 0.01, 3, 20
-M_MIN, M_MAX, N_MASSES = 1, 1, 1
+M_MIN, M_MAX, N_MASSES = 0.01, 3, 20
 DEFAULT_MASSES: list[float] = [
     round(float(m), 4) for m in np.geomspace(M_MIN, M_MAX, num=N_MASSES) # log
     # round(float(m), 4) for m in np.linspace(M_MIN, M_MAX, num=N_MASSES) # linear
 ]
-DEFAULT_ESTIMATORS: list[str] = ["pid_error", "lyapunov", "momentum_observer"]
+DEFAULT_ESTIMATORS: list[str] = [
+    "pid_error",
+    "lyapunov",
+    "momentum_observer",
+    "inverse_dynamics",
+]
 
 # Loose tolerance on |err%|. Trials outside this are reported but the script
 # does not fail the run on them; the focus is on the per-trial numbers, not

@@ -91,11 +91,43 @@ def main() -> int:
                 )
 
     print_results(rows)
+    write_csv(rows, args, cfg, profile)
     print(
         f"\ncomparison took {time.time() - t0:.1f}s over {len(rows)} trials "
         f"(profile={profile.name})"
     )
     return 0
+
+
+def write_csv(rows: list[dict], args: argparse.Namespace, cfg: dict, profile) -> None:
+    """Write the per-trial rows to a timestamped CSV under <repo>/results/."""
+    import csv
+
+    weigh_time = (
+        args.weigh_time
+        if args.weigh_time is not None
+        else max(float(cfg["weigh"]["hold_seconds"]), profile.weigh_hold_time_min)
+    )
+    weigh_mode = "lift" if args.collect_lift_samples else "hold"
+    results_dir = Path(__file__).resolve().parents[2] / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+    csv_path = results_dir / f"estimator_accuracy_{stamp}.csv"
+    with open(csv_path, "w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow([
+            "controller", "estimator", "profile", "weigh_mode", "weigh_time_s",
+            "true_mass_kg", "m_hat_kg", "err_pct", "sigma_kg",
+            "bin_label", "completed", "error",
+        ])
+        for row in rows:
+            writer.writerow([
+                row["controller"], row["estimator"], profile.name,
+                weigh_mode, weigh_time,
+                row["mass"], row["m_hat"], row["err_pct"], row["sigma"],
+                row["bin_label"] or "", int(row["ok"]), row["error"],
+            ])
+    print(f"\nwrote {csv_path} ({len(rows)} rows)")
 
 
 def run_trial(

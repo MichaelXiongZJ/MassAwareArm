@@ -118,5 +118,10 @@ joint peak error <= 2 deg
 max |tau_cmd_raw| / actuator_limit <= 0.95
 ```
 
+Metrics are scored over the carry phases only (everything before the
+`release` stage). Detaching the payload re-enables cube collision while the
+cube still overlaps the gripper pads, and the resulting one-tick contact
+impulse would otherwise dominate the peak metrics.
+
 End-effector error is reported as a diagnostic, not used as the default
 pass/fail criterion.

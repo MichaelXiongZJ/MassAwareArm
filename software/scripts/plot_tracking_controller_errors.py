@@ -224,6 +224,7 @@ def run_controller_trace(
     move_to_release_time: float,
     weigh_time: float | None,
     allow_controller_overrides: bool = True,
+    estimator_name: str = "inverse_dynamics",
 ) -> TrackingTrace:
     env = MujocoEnv()
     env.set_body_mass(CUBE_BODY, mass)
@@ -238,7 +239,7 @@ def run_controller_trace(
         profile,
         allow_overrides=allow_controller_overrides,
     )
-    estimator = make_estimator("inverse_dynamics", cfg, profile, controller_name)
+    estimator = make_estimator(estimator_name, cfg, profile, controller_name)
 
     cube_xyz = env.data.xpos[env.model.body(CUBE_BODY).id].copy()
     active = make_pick_weigh_plan(
