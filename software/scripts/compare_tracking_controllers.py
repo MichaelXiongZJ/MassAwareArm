@@ -162,18 +162,6 @@ def run_trial(
         )
         estimator = make_estimator(estimator_name, cfg, profile, controller_name)
 
-        if estimator.requires_calibration:
-            run_calibration(
-                env,
-                robot,
-                controller,
-                estimator,
-                cfg["poses"]["weigh_qpos"],
-                hold_time=calibration_time,
-            )
-            controller.clear_overrides()
-            env.reset(arm_qpos=cfg["poses"]["home_qpos"])
-
         cube_xyz = env.data.xpos[env.model.body(CUBE_BODY).id].copy()
         trajectory = make_pick_weigh_plan(
             env,
@@ -186,6 +174,33 @@ def run_trial(
             weigh_time=weigh_time,
             collect_lift_samples=collect_lift_samples,
         )
+
+        if estimator.requires_calibration:
+            # Calibrate at the trajectory's actual weigh pose (IK-derived for
+            # the tracking profile), not cfg weigh_qpos: pose-sensitive
+            # baselines (pid_error tau_ss_empty, lyapunov q_empty/z_empty)
+            # are only valid at the pose where the mission actually weighs.
+            run_calibration(
+                env,
+                robot,
+                controller,
+                estimator,
+                trajectory.final_q,
+                hold_time=calibration_time,
+            )
+            env.reset(arm_qpos=cfg["poses"]["home_qpos"])
+            cube_xyz = env.data.xpos[env.model.body(CUBE_BODY).id].copy()
+            trajectory = make_pick_weigh_plan(
+                env,
+                robot,
+                cfg,
+                profile,
+                cube_xyz,
+                move_to_grasp_time=move_to_grasp_time,
+                lift_to_weigh_time=lift_to_weigh_time,
+                weigh_time=weigh_time,
+                collect_lift_samples=collect_lift_samples,
+            )
         result = run_tracking_mission(
             env,
             robot,
