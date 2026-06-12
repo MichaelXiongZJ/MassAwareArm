@@ -62,9 +62,17 @@ Plot payload and speed robustness:
   --disable-controller-overrides
 ```
 
+Metrics are scored over the carry phases only (everything before the
+`release` stage). Detaching the payload re-enables cube collision while the
+cube still overlaps the gripper pads, and the resulting one-tick contact
+impulse would otherwise dominate the peak metrics.
+
+End-effector error is reported as a diagnostic, not used as the default
+pass/fail criterion.
+
 ## Notes
 
-- `pid_tracking` uses feedback plus gravity and payload compensation.
+- `pd_with_gravity` uses feedback plus gravity and payload compensation.
 - `inverse_dynamics` uses computed torque with mass matrix, bias terms, and
   payload compensation.
 - Default pass/fail checks use peak joint error <= 2 deg and

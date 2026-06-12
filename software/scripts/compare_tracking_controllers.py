@@ -51,6 +51,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="ignore estimator-requested gain overrides during weighing/calibration",
     )
+    parser.add_argument(
+        "--collect-lift-samples",
+        action="store_true",
+        help="feed estimators during the lift-to-weigh motion (pause-free weighing)",
+    )
     return parser.parse_args()
 
 
@@ -81,15 +86,48 @@ def main() -> int:
                         weigh_time=args.weigh_time,
                         calibration_time=args.calibration_time,
                         allow_controller_overrides=not args.disable_controller_overrides,
+                        collect_lift_samples=True if args.collect_lift_samples else None,
                     )
                 )
 
     print_results(rows)
+    write_csv(rows, args, cfg, profile)
     print(
         f"\ncomparison took {time.time() - t0:.1f}s over {len(rows)} trials "
         f"(profile={profile.name})"
     )
     return 0
+
+
+def write_csv(rows: list[dict], args: argparse.Namespace, cfg: dict, profile) -> None:
+    """Write the per-trial rows to a timestamped CSV under <repo>/results/."""
+    import csv
+
+    weigh_time = (
+        args.weigh_time
+        if args.weigh_time is not None
+        else max(float(cfg["weigh"]["hold_seconds"]), profile.weigh_hold_time_min)
+    )
+    weigh_mode = "lift" if args.collect_lift_samples else "hold"
+    results_dir = Path(__file__).resolve().parents[2] / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+    csv_path = results_dir / f"estimator_accuracy_{stamp}.csv"
+    with open(csv_path, "w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow([
+            "controller", "estimator", "profile", "weigh_mode", "weigh_time_s",
+            "true_mass_kg", "m_hat_kg", "err_pct", "sigma_kg",
+            "bin_label", "completed", "error",
+        ])
+        for row in rows:
+            writer.writerow([
+                row["controller"], row["estimator"], profile.name,
+                weigh_mode, weigh_time,
+                row["mass"], row["m_hat"], row["err_pct"], row["sigma"],
+                row["bin_label"] or "", int(row["ok"]), row["error"],
+            ])
+    print(f"\nwrote {csv_path} ({len(rows)} rows)")
 
 
 def run_trial(
@@ -105,6 +143,7 @@ def run_trial(
     weigh_time: float | None,
     calibration_time: float,
     allow_controller_overrides: bool,
+    collect_lift_samples: bool | None = None,
 ) -> dict:
     try:
         env = MujocoEnv()
@@ -123,18 +162,6 @@ def run_trial(
         )
         estimator = make_estimator(estimator_name, cfg, profile, controller_name)
 
-        if estimator.requires_calibration:
-            run_calibration(
-                env,
-                robot,
-                controller,
-                estimator,
-                cfg["poses"]["weigh_qpos"],
-                hold_time=calibration_time,
-            )
-            controller.clear_overrides()
-            env.reset(arm_qpos=cfg["poses"]["home_qpos"])
-
         cube_xyz = env.data.xpos[env.model.body(CUBE_BODY).id].copy()
         trajectory = make_pick_weigh_plan(
             env,
@@ -145,7 +172,35 @@ def run_trial(
             move_to_grasp_time=move_to_grasp_time,
             lift_to_weigh_time=lift_to_weigh_time,
             weigh_time=weigh_time,
+            collect_lift_samples=collect_lift_samples,
         )
+
+        if estimator.requires_calibration:
+            # Calibrate at the trajectory's actual weigh pose (IK-derived for
+            # the tracking profile), not cfg weigh_qpos: pose-sensitive
+            # baselines (pid_error tau_ss_empty, lyapunov q_empty/z_empty)
+            # are only valid at the pose where the mission actually weighs.
+            run_calibration(
+                env,
+                robot,
+                controller,
+                estimator,
+                trajectory.final_q,
+                hold_time=calibration_time,
+            )
+            env.reset(arm_qpos=cfg["poses"]["home_qpos"])
+            cube_xyz = env.data.xpos[env.model.body(CUBE_BODY).id].copy()
+            trajectory = make_pick_weigh_plan(
+                env,
+                robot,
+                cfg,
+                profile,
+                cube_xyz,
+                move_to_grasp_time=move_to_grasp_time,
+                lift_to_weigh_time=lift_to_weigh_time,
+                weigh_time=weigh_time,
+                collect_lift_samples=collect_lift_samples,
+            )
         result = run_tracking_mission(
             env,
             robot,

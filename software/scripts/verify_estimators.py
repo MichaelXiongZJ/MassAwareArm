@@ -30,6 +30,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from massaware.estimators import inverse_dynamics as _inverse_dynamics  # noqa: F401  (registration)
 from massaware.planner import FSM
 from massaware.tick_loop import Gripper, _build_obs
 from scripts.mission import build
@@ -43,7 +44,12 @@ DEFAULT_MASSES: list[float] = [
     round(float(m), 4) for m in np.geomspace(M_MIN, M_MAX, num=N_MASSES) # log
     # round(float(m), 4) for m in np.linspace(M_MIN, M_MAX, num=N_MASSES) # linear
 ]
-DEFAULT_ESTIMATORS: list[str] = ["pid_error", "lyapunov", "momentum_observer"]
+DEFAULT_ESTIMATORS: list[str] = [
+    "pid_error",
+    "lyapunov",
+    "momentum_observer",
+    "inverse_dynamics",
+]
 
 # Loose tolerance on |err%|. Trials outside this are reported but the script
 # does not fail the run on them; the focus is on the per-trial numbers, not
@@ -71,7 +77,7 @@ def _drive(env, ctx, controller, gripper, fsm, viewer=None) -> None:
             dt=env.dt,
             use_gravity_comp=False,
         ) + qb * ctx.gravity_comp_mask
-        env.set_arm_ctrl(tau)
+        tau = env.set_arm_ctrl(tau)  # keep the clipped command for the estimator obs
         gripper.apply(ctx.gripper_cmd)
         t0 = time.perf_counter() if viewer is not None else 0.0
         mujoco.mj_step(env.model, env.data)
