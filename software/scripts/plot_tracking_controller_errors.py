@@ -1,4 +1,4 @@
-"""Plot tracking-controller joint, EE, and torque errors in the main scene."""
+"""Plot tracking-controller errors over the full mission or release window."""
 
 from __future__ import annotations
 
@@ -24,10 +24,16 @@ if str(SOFTWARE_ROOT) not in sys.path:
 from massaware.classify import classify_mass
 from massaware.config import load_config
 from massaware.controllers.attachment import TrackingAttachment
-from massaware.controllers.ik import make_tracking_ik
+from massaware.controllers.ik import make_tracking_ik, solve_tracking_ik
 from massaware.controllers.profiles import TrackingProfile, tracking_profile
 from massaware.controllers.references import JointReference
-from massaware.controllers.trajectory import JointTrajectory, make_release_trajectory
+from massaware.controllers.trajectory import (
+    JointTrajectory,
+    make_release_trajectory,
+    release_approach_target,
+    release_target,
+    release_time,
+)
 from massaware.estimators import inverse_dynamics as _inverse_dynamics  # noqa: F401
 from massaware.estimators.base import Estimator
 from massaware.mujoco_env import MujocoEnv, UR5E_JOINTS
@@ -40,10 +46,6 @@ from mission_tracking import (
     make_controller,
     make_estimator,
     make_pick_weigh_plan,
-    release_approach_target,
-    release_target,
-    release_time,
-    solve_ik,
 )
 
 AXIS_LABELS = ["x", "y", "z"]
@@ -56,6 +58,10 @@ JOINT_COLORS = [
     "tab:purple",
     "tab:brown",
 ]
+CONTROLLER_LABELS = {
+    "pid_tracking": "PD+G_controller",
+    "inverse_dynamics": "inverse_dynamics_controller",
+}
 
 
 @dataclass(frozen=True)
@@ -109,6 +115,12 @@ def parse_args() -> argparse.Namespace:
         "--output-dir",
         default=str(SOFTWARE_ROOT / "output" / "tracking_controller_error_plots"),
     )
+    parser.add_argument(
+        "--time-window",
+        choices=["full", "release"],
+        default="full",
+        help="plot the full mission or only the payload-carrying release motion",
+    )
     parser.add_argument("--joint-threshold-deg", type=float, default=2.0)
     parser.add_argument("--ee-threshold-mm", type=float, default=5.0)
     parser.add_argument(
@@ -121,27 +133,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=argparse.SUPPRESS,
     )
-    parser.add_argument(
-        "--sweep-payload-limits",
-        action="store_true",
-        help="also sweep payload masses and report tracking-acceptable torque limits",
-    )
-    parser.add_argument(
-        "--sweep-masses",
-        default="0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1,1.25,1.5,2,3,5,7.5,10,15,20",
-    )
-    parser.add_argument(
-        "--limit-joint-peak-deg",
-        type=float,
-        default=2.0,
-        help="payload sweep pass threshold for peak joint error",
-    )
-    parser.add_argument(
-        "--limit-torque-ratio",
-        type=float,
-        default=0.95,
-        help="payload sweep pass threshold for max commanded torque / actuator limit",
-    )
+    parser.add_argument("--torque-ratio", type=float, default=0.95)
     parser.add_argument(
         "--disable-controller-overrides",
         action="store_true",
@@ -161,7 +153,7 @@ def main() -> int:
     joint_errors: dict[str, np.ndarray] = {}
 
     for controller_name in args.controllers:
-        trace = run_controller_trace(
+        full_trace = run_controller_trace(
             cfg,
             profile,
             controller_name,
@@ -173,26 +165,35 @@ def main() -> int:
             weigh_time=args.weigh_time,
             allow_controller_overrides=not args.disable_controller_overrides,
         )
+        trace = select_time_window(full_trace, args.time_window)
         traces[controller_name] = trace
         prefix = output_dir / controller_name
-        plot_joint_angles_velocities(trace, prefix.with_name(f"{controller_name}_joint_angles_velocities.png"))
+        suffix = "" if args.time_window == "full" else f"_{args.time_window}"
+        plot_joint_angles_velocities(
+            trace,
+            prefix.with_name(f"{controller_name}{suffix}_joint_angles_velocities.png"),
+        )
         joint_errors[controller_name] = plot_joint_errors(
             trace,
-            prefix.with_name(f"{controller_name}_joint_position_error.png"),
+            prefix.with_name(f"{controller_name}{suffix}_joint_position_error.png"),
             threshold_deg=args.joint_threshold_deg,
         )
-        plot_joint_torques(trace, prefix.with_name(f"{controller_name}_joint_torques.png"))
+        plot_joint_torques(
+            trace,
+            prefix.with_name(f"{controller_name}{suffix}_joint_torques.png"),
+        )
+        print_window_metrics(trace, args.joint_threshold_deg, args.torque_ratio)
 
         if args.include_ee_plots and not args.skip_ee_plots:
-            plot_ee_position(trace, prefix.with_name(f"{controller_name}_ee_position.png"))
+            plot_ee_position(trace, prefix.with_name(f"{controller_name}{suffix}_ee_position.png"))
             plot_ee_error(
                 trace,
-                prefix.with_name(f"{controller_name}_ee_position_error.png"),
+                prefix.with_name(f"{controller_name}{suffix}_ee_position_error.png"),
                 threshold_m=args.ee_threshold_mm / 1000.0,
             )
             plot_orientation_error(
                 trace,
-                prefix.with_name(f"{controller_name}_ee_orientation_error.png"),
+                prefix.with_name(f"{controller_name}{suffix}_ee_orientation_error.png"),
             )
 
     if "pid_tracking" in traces and "inverse_dynamics" in traces:
@@ -201,12 +202,9 @@ def main() -> int:
             joint_errors["pid_tracking"],
             traces["inverse_dynamics"],
             joint_errors["inverse_dynamics"],
-            output_dir / "pid_tracking_vs_inverse_dynamics_joint_error_comparison.png",
+            output_dir / f"pid_tracking_vs_inverse_dynamics{suffix}_joint_error_comparison.png",
             threshold_deg=args.joint_threshold_deg,
         )
-
-    if args.sweep_payload_limits:
-        sweep_payload_limits(cfg, profile, args)
 
     print(f"wrote plots to {output_dir}")
     return 0
@@ -305,7 +303,7 @@ def run_controller_trace(
                         if profile.use_analytical_ik
                         else None
                     )
-                    q_release_approach = solve_ik(
+                    q_release_approach = solve_tracking_ik(
                         robot,
                         release_approach_xyz,
                         q_start,
@@ -313,7 +311,7 @@ def run_controller_trace(
                         ik_solver=ik_solver,
                         target_orientation=target_orientation,
                     )
-                    q_release = solve_ik(
+                    q_release = solve_tracking_ik(
                         robot,
                         release_xyz,
                         q_release_approach,
@@ -449,122 +447,16 @@ def controller_payload(
 ) -> float:
     if not sample.compensate_payload or sample.collect_mass_samples:
         return 0.0
+    scale = float(sample.payload_comp_scale)
     if payload_comp_mode == "oracle":
-        return true_mass
+        return true_mass * scale
     if payload_comp_mode == "estimated":
-        return estimated_mass
+        return estimated_mass * scale
     return 0.0
 
 
 def actuator_ctrl_limits(env: MujocoEnv) -> tuple[np.ndarray, np.ndarray]:
     return env.arm_ctrl_limits()
-
-
-def sweep_payload_limits(cfg: dict, profile: TrackingProfile, args: argparse.Namespace) -> None:
-    masses = parse_float_csv(args.sweep_masses)
-    controllers = list(args.controllers)
-    print("\nPayload sweep, tracking-accuracy pass/fail")
-    print(
-        "pass criteria: "
-        f"joint peak <= {args.limit_joint_peak_deg:.3g} deg, "
-        f"max |tau|/limit <= {args.limit_torque_ratio:.3g}; "
-        "EE error is reported only, "
-        f"payload={args.payload_comp_mode}"
-    )
-    print(
-        f"{'controller':<18} {'mass':>7} {'joint_peak':>11} {'ee_peak':>10} "
-        f"{'max_tau':>10} {'tau/lim':>9} {'status':>8}"
-    )
-    print("-" * 82)
-    rows: list[dict] = []
-    for controller_name in controllers:
-        for mass in masses:
-            row = payload_sweep_row(cfg, profile, controller_name, mass, args)
-            rows.append(row)
-            status = "PASS" if row["passed"] else "FAIL"
-            if row["error"]:
-                status = "ERROR"
-            print(
-                f"{controller_name:<18} {mass:>7.3f} "
-                f"{fmt(row['joint_peak']):>11} {fmt(row['ee_peak']):>10} "
-                f"{fmt(row['max_tau']):>10} {fmt(row['torque_ratio']):>9} "
-                f"{status:>8} {row['error']}"
-            )
-
-    print("\nTracking-acceptable payload/torque limit from sampled masses:")
-    for controller_name in controllers:
-        passing = [
-            row
-            for row in rows
-            if row["controller"] == controller_name and row["passed"]
-        ]
-        if not passing:
-            print(f"  {controller_name:<18} no sampled mass passed")
-            continue
-        best_mass = max(passing, key=lambda row: row["mass"])
-        best_torque = max(passing, key=lambda row: row["max_tau"])
-        print(
-            f"  {controller_name:<18} "
-            f"max mass={best_mass['mass']:.3f} kg "
-            f"(max_tau={best_mass['max_tau']:.2f} N-m, "
-            f"tau/lim={best_mass['torque_ratio']:.3f}); "
-            f"largest passing torque={best_torque['max_tau']:.2f} N-m "
-            f"at {best_torque['mass']:.3f} kg"
-        )
-
-
-def payload_sweep_row(
-    cfg: dict,
-    profile: TrackingProfile,
-    controller_name: str,
-    mass: float,
-    args: argparse.Namespace,
-) -> dict:
-    try:
-        trace = run_controller_trace(
-            cfg,
-            profile,
-            controller_name,
-            mass=mass,
-            payload_comp_mode=args.payload_comp_mode,
-            move_to_grasp_time=args.move_to_grasp_time,
-            lift_to_weigh_time=args.lift_to_weigh_time,
-            move_to_release_time=release_time(args.move_to_release_time, profile),
-            weigh_time=args.weigh_time,
-            allow_controller_overrides=not args.disable_controller_overrides,
-        )
-        joint_error_deg = np.rad2deg(trace.q_ref - trace.q)
-        ee_error_mm = (trace.desired_position - trace.actual_position) * 1000.0
-        torque_limit = np.maximum(np.abs(trace.torque_min), np.abs(trace.torque_max))
-        joint_peak = float(np.max(np.abs(joint_error_deg)))
-        ee_peak = float(np.max(np.linalg.norm(ee_error_mm, axis=1)))
-        max_tau = float(np.max(np.abs(trace.tau)))
-        torque_ratio = float(np.max(np.abs(trace.tau) / torque_limit))
-        passed = (
-            joint_peak <= args.limit_joint_peak_deg
-            and torque_ratio <= args.limit_torque_ratio
-        )
-        return {
-            "controller": controller_name,
-            "mass": mass,
-            "joint_peak": joint_peak,
-            "ee_peak": ee_peak,
-            "max_tau": max_tau,
-            "torque_ratio": torque_ratio,
-            "passed": passed,
-            "error": "",
-        }
-    except Exception as exc:
-        return {
-            "controller": controller_name,
-            "mass": mass,
-            "joint_peak": np.nan,
-            "ee_peak": np.nan,
-            "max_tau": np.nan,
-            "torque_ratio": np.nan,
-            "passed": False,
-            "error": repr(exc),
-        }
 
 
 def parse_float_csv(value: str) -> list[float]:
@@ -588,6 +480,106 @@ def relative_stage_times(
     start_time: float,
 ) -> list[tuple[float, str]]:
     return [(time - start_time, stage) for time, stage in stage_transitions]
+
+
+def select_time_window(trace: TrackingTrace, time_window: str) -> TrackingTrace:
+    if time_window == "full":
+        return trace
+    if time_window == "release":
+        return release_motion_window(trace)
+    raise ValueError(f"Unknown time window '{time_window}'")
+
+
+def release_motion_window(trace: TrackingTrace) -> TrackingTrace:
+    start = stage_time(trace, "move_to_release_approach")
+    end = stage_time(trace, "release")
+    if start is None:
+        raise RuntimeError("Trace has no move_to_release_approach stage")
+    if end is None:
+        end = float(trace.time[-1])
+
+    mask = (trace.time >= start) & (trace.time < end)
+    if not np.any(mask):
+        raise RuntimeError("Release-motion window is empty")
+
+    indices = np.flatnonzero(mask)
+    first = int(indices[0])
+    last = int(indices[-1]) + 1
+    time = trace.time[first:last] - trace.time[first]
+    transitions = [
+        (stage_t - trace.time[first], stage)
+        for stage_t, stage in trace.stage_transitions
+        if trace.time[first] <= stage_t < trace.time[last - 1] + 1e-9
+    ]
+
+    return TrackingTrace(
+        controller=trace.controller,
+        profile=trace.profile,
+        mass=trace.mass,
+        payload_comp_mode=trace.payload_comp_mode,
+        joint_names=trace.joint_names,
+        time=time,
+        q=trace.q[first:last],
+        q_dot=trace.q_dot[first:last],
+        q_ref=trace.q_ref[first:last],
+        q_dot_ref=trace.q_dot_ref[first:last],
+        tau=trace.tau[first:last],
+        tau_clipped=trace.tau_clipped[first:last],
+        tau_feedback=trace.tau_feedback[first:last],
+        tau_feedforward=trace.tau_feedforward[first:last],
+        tau_payload=trace.tau_payload[first:last],
+        tau_gravity=trace.tau_gravity[first:last],
+        tau_bias=trace.tau_bias[first:last],
+        torque_min=trace.torque_min,
+        torque_max=trace.torque_max,
+        stage_transitions=transitions,
+        actual_position=trace.actual_position[first:last],
+        desired_position=trace.desired_position[first:last],
+        orientation_error=trace.orientation_error[first:last],
+    )
+
+
+def stage_time(trace: TrackingTrace, stage_name: str) -> float | None:
+    for time, stage in trace.stage_transitions:
+        if stage == stage_name:
+            return float(time)
+    return None
+
+
+def print_window_metrics(
+    trace: TrackingTrace,
+    joint_peak_limit_deg: float,
+    torque_ratio_limit: float,
+) -> None:
+    metrics = tracking_metrics(trace)
+    status = (
+        "PASS"
+        if metrics["joint_peak"] <= joint_peak_limit_deg
+        and metrics["torque_ratio"] <= torque_ratio_limit
+        else "FAIL"
+    )
+    print(
+        f"{trace.controller}: window "
+        f"joint_rms={metrics['joint_rms']:.3f} deg, "
+        f"joint_peak={metrics['joint_peak']:.3f} deg, "
+        f"ee_rms={metrics['ee_rms']:.3f} mm, "
+        f"ee_peak={metrics['ee_peak']:.3f} mm, "
+        f"tau/lim={metrics['torque_ratio']:.3f}, {status}"
+    )
+
+
+def tracking_metrics(trace: TrackingTrace) -> dict[str, float]:
+    joint_err_deg = np.rad2deg(trace.q_ref - trace.q)
+    ee_err_mm = (trace.desired_position - trace.actual_position) * 1000.0
+    torque_limit = np.maximum(np.abs(trace.torque_min), np.abs(trace.torque_max))
+    return {
+        "joint_rms": float(np.sqrt(np.mean(joint_err_deg**2))),
+        "joint_peak": float(np.max(np.abs(joint_err_deg))),
+        "ee_rms": float(np.sqrt(np.mean(ee_err_mm**2))),
+        "ee_peak": float(np.max(np.linalg.norm(ee_err_mm, axis=1))),
+        "max_tau": float(np.max(np.abs(trace.tau))),
+        "torque_ratio": float(np.max(np.abs(trace.tau) / torque_limit)),
+    }
 
 
 def xyz_euler_from_rotation(rotation: np.ndarray) -> np.ndarray:
@@ -785,12 +777,15 @@ def plot_joint_error_comparison(
         color = JOINT_COLORS[joint_index % len(JOINT_COLORS)]
         ax.plot(trace_a.time, err_a[:, joint_index], color=color, linestyle="--", alpha=0.5, linewidth=0.9)
         ax.plot(trace_b.time, err_b[:, joint_index], color=color, linestyle="-", linewidth=1.2)
-    ax.plot([], [], "k--", linewidth=0.9, label=trace_a.controller)
-    ax.plot([], [], "k-", linewidth=1.2, label=trace_b.controller)
+    ax.plot([], [], "k--", linewidth=0.9, label=controller_label(trace_a.controller))
+    ax.plot([], [], "k-", linewidth=1.2, label=controller_label(trace_b.controller))
     ax.axhline(threshold_deg, linestyle="--", color="black", linewidth=1.0)
     ax.axhline(-threshold_deg, linestyle="--", color="black", linewidth=1.0, label=f"+/-{threshold_deg:.0f} deg")
     mark_stage_transitions(ax, trace_a)
-    ax.set_title(f"Joint Tracking Error Comparison - {trace_a.controller} vs {trace_b.controller}")
+    ax.set_title(
+        "Joint Tracking Error Comparison - "
+        f"{controller_label(trace_a.controller)} vs {controller_label(trace_b.controller)}"
+    )
     ax.set_xlabel("Time [s]")
     ax.set_ylabel("Error [deg]")
     ax.legend(fontsize=8)
@@ -802,9 +797,13 @@ def plot_joint_error_comparison(
 
 def title(trace: TrackingTrace, text: str) -> str:
     return (
-        f"{trace.controller} - {text} "
+        f"{controller_label(trace.controller)} - {text} "
         f"(profile={trace.profile}, mass={trace.mass:.2f}kg, payload={trace.payload_comp_mode})"
     )
+
+
+def controller_label(controller: str) -> str:
+    return CONTROLLER_LABELS.get(controller, controller)
 
 
 if __name__ == "__main__":

@@ -1,122 +1,71 @@
 # Tracking Controllers
 
-This package contains the joint-space tracking controllers and helper code used
-by the controller comparison scripts. It is separate from the original
-`massaware/controller.py` pipeline.
+This directory contains the joint-space tracking controller code used by
+`software/scripts/mission_tracking.py` and the controller comparison/plotting
+scripts. It is separate from the older FSM pipeline in `massaware/controller.py`
+and `software/scripts/mission.py`.
 
 ## Files
 
 ```text
-software/massaware/controllers/
-  base.py                         shared gains, errors, overrides, payload comp.
-  pid_tracking.py                 PD/PID + gravity + payload compensation
-  inverse_dynamics_tracking.py    computed-torque tracking controller
-  references.py                   reference/output dataclasses
-  trajectory.py                   pick-weigh-release joint trajectories
-  ik.py                           UR5e IK helper
-  attachment.py                   payload attachment force model
-  profiles.py                     tracking profiles and controller gains
+base.py                       shared gain overrides, tracking error, payload comp
+pd_with_gravity_tracking.py   PD tracking controller with gravity comp
+inverse_dynamics_tracking.py  computed-torque tracking controller
+references.py                 controller input/output dataclasses
+trajectory.py                 pick-weigh-release trajectories and release helpers
+ik.py                         UR5e analytical IK plus fallback IK wrapper
+attachment.py                 temporary payload attachment/force model
+profiles.py                   controller gains and tracking experiment profiles
 ```
 
-## Controllers
+## Runtime Flow
 
-PID tracking:
+`mission_tracking.py` builds a controller, estimator, pick/weigh trajectory, and
+release trajectory:
 
 ```text
-u = Kp(qd - q) + Ki∫(qd - q)dt + Kd(qdot_d - qdot)
-  + tau_g(q) + tau_p(q, m_hat)
+pick/weigh trajectory -> estimate payload mass -> choose bin -> release trajectory
 ```
 
-Inverse dynamics tracking:
+Payload compensation is disabled during pick/weigh. During release, the
+controller uses the estimated payload mass, or the true mass when a script is
+run with oracle payload compensation.
 
-```text
-qddot_cmd = qddot_d + Kd(qdot_d - qdot) + Kp(qd - q)
-u = M(q)qddot_cmd + n(q, qdot) + tau_p(q, m_hat)
-```
+## Main Scripts
 
-Payload compensation is gravity-only:
-
-```text
-tau_p(q, m_hat) = J(q)^T [0, 0, m_hat g]^T
-```
-
-Controller outputs distinguish raw torque demand from actuator-limited command:
-
-```text
-tau_cmd_raw      controller torque demand
-tau_cmd_clipped  command after actuator ctrlrange clipping
-tau_cmd          alias for tau_cmd_clipped
-```
-
-## Payload Timing
-
-Payload compensation is disabled before and during weighing. After weighing,
-release motion uses the estimated mass, or the true mass in oracle experiments.
-
-```text
-pick / lift / weigh_hold: no payload compensation
-release motion: payload compensation enabled
-release after opening: no payload compensation
-```
-
-Estimator-requested gain overrides can be disabled with:
-
-```bash
---disable-controller-overrides
-```
-
-## Main Commands
-
-Controller tracking plots, using oracle payload mass and fixed controller gains:
-
-```bash
-.env/bin/python software/scripts/plot_tracking_controller_errors.py \
-  --payload-comp-mode oracle \
-  --disable-controller-overrides
-```
-
-Include end-effector plots only when needed:
-
-```bash
-.env/bin/python software/scripts/plot_tracking_controller_errors.py \
-  --include-ee-plots
-```
-
-Payload sweep with joint tracking and torque-limit pass/fail:
-
-```bash
-.env/bin/python software/scripts/sweep_tracking_payload_limits.py \
-  --payload-comp-mode oracle \
-  --disable-controller-overrides
-```
-
-Full controller/estimator matrix:
-
-```bash
-.env/bin/python software/scripts/compare_tracking_controllers.py \
-  --profile tracking \
-  --masses 0.5
-```
-
-Viewer:
+Run one tracking mission with viewer:
 
 ```bash
 .env/bin/python software/scripts/mission_tracking.py \
   --viewer \
   --controller inverse_dynamics \
   --estimator inverse_dynamics \
-  --mass 0.5 \
-  --profile tracking
+  --mass 0.5
 ```
 
-## Metrics
+Plot controller tracking errors. Use `--time-window full` for the whole mission
+or `--time-window release` for only the payload-carrying release motion:
 
-For joint-space controller comparisons, pass/fail uses:
-
-```text
-joint peak error <= 2 deg
-max |tau_cmd_raw| / actuator_limit <= 0.95
+```bash
+.env/bin/python software/scripts/plot_tracking_controller_errors.py \
+  --time-window release \
+  --payload-comp-mode oracle \
+  --disable-controller-overrides
 ```
 
-End-effector error is reported as a diagnostic, not used as the default
-pass/fail criterion.
+Plot payload and speed robustness:
+
+```bash
+.env/bin/python software/scripts/plot_controller_robustness.py \
+  --sweeps all \
+  --payload-comp-mode oracle \
+  --disable-controller-overrides
+```
+
+## Notes
+
+- `pid_tracking` uses feedback plus gravity and payload compensation.
+- `inverse_dynamics` uses computed torque with mass matrix, bias terms, and
+  payload compensation.
+- Default pass/fail checks use peak joint error <= 2 deg and
+  max `|tau_cmd_raw| / actuator_limit` <= 0.95.

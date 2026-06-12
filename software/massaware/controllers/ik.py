@@ -8,6 +8,7 @@ import mujoco
 import numpy as np
 
 from massaware.mujoco_env import EE_SITE, MujocoEnv
+from massaware.robot import Robot
 
 
 class RobotIKAdapter:
@@ -59,7 +60,12 @@ class RobotIKAdapter:
 
 
 class UR5eAnalyticalIK:
-    """Full-pose UR5e analytical IK for tracking scripts."""
+    """Full-pose UR5e analytical IK for tracking scripts.
+
+    The analytical IK solver is based on the closed-form inverse kinematics
+    formulation used by the ROS-Industrial ``ur_kinematics`` package for
+    Universal Robots manipulators [rosindustrial_ur_kinematics].
+    """
 
     D1 = 0.163
     A2 = -0.425
@@ -289,6 +295,33 @@ class UR5eAnalyticalIK:
 
 def make_tracking_ik(env: MujocoEnv) -> UR5eAnalyticalIK:
     return UR5eAnalyticalIK(RobotIKAdapter(env))
+
+
+def solve_tracking_ik(
+    robot: Robot,
+    xyz: np.ndarray,
+    seed: np.ndarray,
+    label: str,
+    *,
+    ik_solver: UR5eAnalyticalIK | None = None,
+    target_orientation: np.ndarray | None = None,
+    acceptable_error: float = 0.03,
+) -> np.ndarray:
+    if ik_solver is not None:
+        q, err = ik_solver.solve_task_waypoint(
+            np.asarray(xyz, dtype=float),
+            np.asarray(seed, dtype=float),
+            target_orientation,
+            acceptable_error=acceptable_error,
+        )
+        if err > acceptable_error:
+            print(f"  [IK] warning: {label} error={err:.4f}m/rad")
+        return q
+
+    q, ok = robot.ik(np.asarray(xyz, dtype=float), q_seed=np.asarray(seed, dtype=float))
+    if not ok:
+        raise RuntimeError(f"IK failed for {label} target {np.round(xyz, 3)}")
+    return q
 
 
 def wrap_to_pi(angle: np.ndarray | float) -> np.ndarray | float:

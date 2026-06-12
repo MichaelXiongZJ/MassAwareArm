@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+PAYLOAD_COMP_RAMP_DOWN_TIME = 1.0
+
 
 @dataclass(frozen=True)
 class TrajectorySample:
@@ -16,6 +18,7 @@ class TrajectorySample:
     gripper_closed: bool
     collect_mass_samples: bool
     compensate_payload: bool
+    payload_comp_scale: float
     done: bool = False
 
 
@@ -29,6 +32,7 @@ class TrajectorySegment:
     gripper_closed: bool
     collect_mass_samples: bool
     compensate_payload: bool
+    payload_comp_ramp_down_time: float
 
 
 class JointSegmentTrajectory:
@@ -65,6 +69,7 @@ class JointSegmentTrajectory:
             gripper_closed=self.final_gripper_closed,
             collect_mass_samples=False,
             compensate_payload=self.final_compensate_payload,
+            payload_comp_scale=1.0 if self.final_compensate_payload else 0.0,
             done=True,
         )
 
@@ -173,6 +178,11 @@ class ReleaseTrajectory(JointSegmentTrajectory):
                 release_hold_time,
                 self._blend_time(release_hold_time),
                 gripper_closed=False,
+                compensate_payload=True,
+                payload_comp_ramp_down_time=min(
+                    PAYLOAD_COMP_RAMP_DOWN_TIME,
+                    release_hold_time,
+                ),
             ),
         ]
         super().__init__(segments, q_release, final_gripper_closed=False)
@@ -228,6 +238,29 @@ def make_release_trajectory(
     )
 
 
+def release_time(cli_value: float | None, profile) -> float:
+    return profile.move_to_release_time if cli_value is None else float(cli_value)
+
+
+def release_target(profile, cfg: dict, release_bin: str) -> np.ndarray:
+    if release_bin == "heavy":
+        target = profile.heavy_release_xyz
+        fallback = cfg["poses"]["heavy_bin_drop"]
+    else:
+        target = profile.light_release_xyz
+        fallback = cfg["poses"]["light_bin_drop"]
+    return np.asarray(target if target is not None else fallback, dtype=float).copy()
+
+
+def release_approach_target(profile, release_xyz: np.ndarray) -> np.ndarray:
+    approach = np.asarray(release_xyz, dtype=float).copy()
+    if profile.weigh_xyz is not None:
+        approach[2] = float(profile.weigh_xyz[2])
+    else:
+        approach[2] = approach[2] + 0.18
+    return approach
+
+
 def move_segment(
     name: str,
     start: np.ndarray,
@@ -238,6 +271,7 @@ def move_segment(
     gripper_closed: bool,
     collect_mass_samples: bool = False,
     compensate_payload: bool = False,
+    payload_comp_ramp_down_time: float = 0.0,
 ) -> TrajectorySegment:
     return TrajectorySegment(
         name=name,
@@ -248,6 +282,7 @@ def move_segment(
         gripper_closed=gripper_closed,
         collect_mass_samples=collect_mass_samples,
         compensate_payload=compensate_payload,
+        payload_comp_ramp_down_time=max(float(payload_comp_ramp_down_time), 0.0),
     )
 
 
@@ -260,6 +295,7 @@ def hold_segment(
     gripper_closed: bool,
     collect_mass_samples: bool = False,
     compensate_payload: bool = False,
+    payload_comp_ramp_down_time: float = 0.0,
 ) -> TrajectorySegment:
     return move_segment(
         name,
@@ -270,12 +306,14 @@ def hold_segment(
         gripper_closed=gripper_closed,
         collect_mass_samples=collect_mass_samples,
         compensate_payload=compensate_payload,
+        payload_comp_ramp_down_time=payload_comp_ramp_down_time,
     )
 
 
 def sample_joint_segment(segment: TrajectorySegment, elapsed: float) -> TrajectorySample:
     pos_s, vel_s, acc_s = lspb(elapsed, segment.duration, segment.blend_time)
     delta = segment.goal - segment.start
+    payload_comp_scale = payload_compensation_scale(segment, elapsed)
     return TrajectorySample(
         stage=segment.name,
         q=segment.start + pos_s * delta,
@@ -284,6 +322,21 @@ def sample_joint_segment(segment: TrajectorySegment, elapsed: float) -> Trajecto
         gripper_closed=segment.gripper_closed,
         collect_mass_samples=segment.collect_mass_samples,
         compensate_payload=segment.compensate_payload,
+        payload_comp_scale=payload_comp_scale,
+    )
+
+
+def payload_compensation_scale(segment: TrajectorySegment, elapsed: float) -> float:
+    if not segment.compensate_payload:
+        return 0.0
+    if segment.payload_comp_ramp_down_time <= 0.0:
+        return 1.0
+    return float(
+        np.clip(
+            1.0 - float(elapsed) / segment.payload_comp_ramp_down_time,
+            0.0,
+            1.0,
+        )
     )
 
 

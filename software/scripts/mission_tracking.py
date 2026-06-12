@@ -18,7 +18,7 @@ if str(SOFTWARE_ROOT) not in sys.path:
 from massaware.classify import classify_mass
 from massaware.config import load_config
 from massaware.controllers.attachment import TrackingAttachment
-from massaware.controllers.ik import make_tracking_ik
+from massaware.controllers.ik import make_tracking_ik, solve_tracking_ik
 from massaware.controllers.profiles import (
     TrackingProfile,
     controller_gains,
@@ -33,6 +33,9 @@ from massaware.controllers.trajectory import (
     JointTrajectory,
     make_pick_weigh_trajectory,
     make_release_trajectory,
+    release_approach_target,
+    release_target,
+    release_time,
 )
 from massaware.estimators import build as build_estimator
 from massaware.estimators import inverse_dynamics as _inverse_dynamics  # noqa: F401
@@ -42,7 +45,7 @@ from massaware.estimators import pid_error as _pid_error  # noqa: F401
 from massaware.estimators.base import Estimator, EstimatorObs
 from massaware.mujoco_env import MujocoEnv
 from massaware.robot import Robot
-from massaware.tick_loop import Gripper
+from massaware.tick_loop import Gripper, GripperCmd
 
 CUBE_BODY = "cube"
 
@@ -87,13 +90,11 @@ def main() -> int:
     )
     estimator = make_estimator(args.estimator, cfg, profile, args.controller)
 
-    cube_xyz = env.data.xpos[env.model.body(CUBE_BODY).id].copy()
-    trajectory = make_pick_weigh_plan(
+    trajectory = make_current_pick_weigh_plan(
         env,
         robot,
         cfg,
         profile,
-        cube_xyz,
         move_to_grasp_time=args.move_to_grasp_time,
         lift_to_weigh_time=args.lift_to_weigh_time,
         weigh_time=args.weigh_time,
@@ -109,13 +110,11 @@ def main() -> int:
             hold_time=args.calibration_time,
         )
         env.reset(arm_qpos=cfg["poses"]["home_qpos"])
-        cube_xyz = env.data.xpos[env.model.body(CUBE_BODY).id].copy()
-        trajectory = make_pick_weigh_plan(
+        trajectory = make_current_pick_weigh_plan(
             env,
             robot,
             cfg,
             profile,
-            cube_xyz,
             move_to_grasp_time=args.move_to_grasp_time,
             lift_to_weigh_time=args.lift_to_weigh_time,
             weigh_time=args.weigh_time,
@@ -218,6 +217,29 @@ def make_estimator(
     return build_estimator(name, runtime_cfg)
 
 
+def make_current_pick_weigh_plan(
+    env: MujocoEnv,
+    robot: Robot,
+    cfg: dict,
+    profile: TrackingProfile,
+    *,
+    move_to_grasp_time: float,
+    lift_to_weigh_time: float,
+    weigh_time: float | None,
+) -> JointTrajectory:
+    cube_xyz = env.data.xpos[env.model.body(CUBE_BODY).id].copy()
+    return make_pick_weigh_plan(
+        env,
+        robot,
+        cfg,
+        profile,
+        cube_xyz,
+        move_to_grasp_time=move_to_grasp_time,
+        lift_to_weigh_time=lift_to_weigh_time,
+        weigh_time=weigh_time,
+    )
+
+
 def make_pick_weigh_plan(
     env: MujocoEnv,
     robot: Robot,
@@ -235,7 +257,7 @@ def make_pick_weigh_plan(
     ik_solver = make_tracking_ik(env) if profile.use_analytical_ik else None
     grasp_xyz = profile.grasp_xyz if profile.grasp_xyz is not None else cube_xyz
     if profile.weigh_xyz is not None:
-        q_weigh = solve_ik(
+        q_weigh = solve_tracking_ik(
             robot,
             profile.weigh_xyz,
             q_home,
@@ -243,7 +265,7 @@ def make_pick_weigh_plan(
             ik_solver=ik_solver,
             target_orientation=target_orientation,
         )
-    q_grasp = solve_ik(
+    q_grasp = solve_tracking_ik(
         robot,
         grasp_xyz,
         q_home,
@@ -324,7 +346,7 @@ def run_tracking_mission(
                         if profile.use_analytical_ik
                         else None
                     )
-                    q_release_approach = solve_ik(
+                    q_release_approach = solve_tracking_ik(
                         robot,
                         release_approach_xyz,
                         q_start,
@@ -332,7 +354,7 @@ def run_tracking_mission(
                         ik_solver=ik_solver,
                         target_orientation=target_orientation,
                     )
-                    q_release = solve_ik(
+                    q_release = solve_tracking_ik(
                         robot,
                         release_xyz,
                         q_release_approach,
@@ -385,7 +407,7 @@ def run_tracking_mission(
                 attachment=attachment,
                 payload_mass=payload_mass,
                 controller_payload_mass=(
-                    estimate_result.m_hat
+                    estimate_result.m_hat * sample.payload_comp_scale
                     if estimate_result is not None
                     and sample.compensate_payload
                     and not sample.collect_mass_samples
@@ -493,7 +515,7 @@ def step_reference(
         payload_mass=controller_payload_mass,
     )
     if gripper is not None:
-        gripper.apply(gripper_cmd(gripper_closed))
+        gripper.apply(GripperCmd.CLOSE if gripper_closed else GripperCmd.OPEN)
     mujoco.mj_step(env.model, env.data)
     return output
 
@@ -513,60 +535,6 @@ def build_obs(env: MujocoEnv, robot: Robot, q_ref: np.ndarray, tau_cmd: np.ndarr
         ee_xyz=ee_xyz,
         M=env.mass_matrix(),
     )
-
-
-def gripper_cmd(closed: bool):
-    from massaware.tick_loop import GripperCmd
-
-    return GripperCmd.CLOSE if closed else GripperCmd.OPEN
-
-
-def solve_ik(
-    robot: Robot,
-    xyz: np.ndarray,
-    seed: np.ndarray,
-    label: str,
-    *,
-    ik_solver=None,
-    target_orientation: np.ndarray | None = None,
-) -> np.ndarray:
-    if ik_solver is not None:
-        q, err = ik_solver.solve_task_waypoint(
-            np.asarray(xyz, dtype=float),
-            np.asarray(seed, dtype=float),
-            target_orientation,
-            acceptable_error=0.03,
-        )
-        if err > 0.03:
-            print(f"  [IK] warning: {label} error={err:.4f}m/rad")
-        return q
-    q, ok = robot.ik(np.asarray(xyz, dtype=float), q_seed=np.asarray(seed, dtype=float))
-    if not ok:
-        raise RuntimeError(f"IK failed for {label} target {np.round(xyz, 3)}")
-    return q
-
-
-def release_time(cli_value: float | None, profile: TrackingProfile) -> float:
-    return profile.move_to_release_time if cli_value is None else float(cli_value)
-
-
-def release_target(profile: TrackingProfile, cfg: dict, release_bin: str) -> np.ndarray:
-    if release_bin == "heavy":
-        target = profile.heavy_release_xyz
-        fallback = cfg["poses"]["heavy_bin_drop"]
-    else:
-        target = profile.light_release_xyz
-        fallback = cfg["poses"]["light_bin_drop"]
-    return np.asarray(target if target is not None else fallback, dtype=float).copy()
-
-
-def release_approach_target(profile: TrackingProfile, release_xyz: np.ndarray) -> np.ndarray:
-    approach = np.asarray(release_xyz, dtype=float).copy()
-    if profile.weigh_xyz is not None:
-        approach[2] = float(profile.weigh_xyz[2])
-    else:
-        approach[2] = approach[2] + 0.18
-    return approach
 
 
 if __name__ == "__main__":
