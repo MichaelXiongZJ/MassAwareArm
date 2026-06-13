@@ -396,9 +396,9 @@ def run_tracking_mission(
                 sample.gripper_closed,
                 gravity_mask=gravity_mask,
                 attachment=attachment,
-                payload_mass=payload_mass,
+                payload_mass=payload_mass * sample.payload_scale,
                 controller_payload_mass=(
-                    estimate_result.m_hat
+                    estimate_result.m_hat * sample.payload_scale
                     if estimate_result is not None
                     and sample.compensate_payload
                     and not sample.collect_mass_samples

@@ -353,7 +353,7 @@ def run_controller_trace(
 
             env.data.qfrc_applied[:] = 0.0
             mujoco.mj_forward(env.model, env.data)
-            attachment.update(mass)
+            attachment.update(mass * sample.payload_scale)
 
             desired_position, desired_rotation = robot.fk(sample.q)
             actual_position, actual_rotation = env.ee_pose()
@@ -451,9 +451,9 @@ def controller_payload(
     if not sample.compensate_payload or sample.collect_mass_samples:
         return 0.0
     if payload_comp_mode == "oracle":
-        return true_mass
+        return true_mass * sample.payload_scale
     if payload_comp_mode == "estimated":
-        return estimated_mass
+        return estimated_mass * sample.payload_scale
     return 0.0
 
 
@@ -773,6 +773,21 @@ def plot_orientation_error(
     return err_deg
 
 
+CONTROLLER_DISPLAY = {
+    "pid_tracking": "PD+G controller",
+    "inverse_dynamics": "Inverse dynamics controller",
+}
+
+JOINT_DISPLAY = [
+    "$q_1$ shoulder pan",
+    "$q_2$ shoulder lift",
+    "$q_3$ elbow",
+    "$q_4$ wrist 1",
+    "$q_5$ wrist 2",
+    "$q_6$ wrist 3",
+]
+
+
 def plot_joint_error_comparison(
     trace_a: TrackingTrace,
     err_a: np.ndarray,
@@ -781,20 +796,31 @@ def plot_joint_error_comparison(
     output_path: Path,
     threshold_deg: float = 2.0,
 ) -> None:
+    name_a = CONTROLLER_DISPLAY.get(trace_a.controller, trace_a.controller)
+    name_b = CONTROLLER_DISPLAY.get(trace_b.controller, trace_b.controller)
     fig, ax = plt.subplots(figsize=(12, 6))
+    joint_handles = []
     for joint_index in range(len(trace_a.joint_names)):
         color = JOINT_COLORS[joint_index % len(JOINT_COLORS)]
         ax.plot(trace_a.time, err_a[:, joint_index], color=color, linestyle="--", alpha=0.5, linewidth=0.9)
-        ax.plot(trace_b.time, err_b[:, joint_index], color=color, linestyle="-", linewidth=1.2)
-    ax.plot([], [], "k--", linewidth=0.9, label=trace_a.controller)
-    ax.plot([], [], "k-", linewidth=1.2, label=trace_b.controller)
-    ax.axhline(threshold_deg, linestyle="--", color="black", linewidth=1.0)
-    ax.axhline(-threshold_deg, linestyle="--", color="black", linewidth=1.0, label=f"+/-{threshold_deg:.0f} deg")
+        (line_b,) = ax.plot(trace_b.time, err_b[:, joint_index], color=color, linestyle="-", linewidth=1.2)
+        joint_handles.append((line_b, JOINT_DISPLAY[joint_index % len(JOINT_DISPLAY)]))
+    style_handles = [
+        (ax.plot([], [], "k--", linewidth=0.9)[0], name_a),
+        (ax.plot([], [], "k-", linewidth=1.2)[0], name_b),
+    ]
+    ax.axhline(0.0, linestyle="--", color="gray", linewidth=0.9)
+    bound = ax.axhline(threshold_deg, linestyle="--", color="black", linewidth=1.0)
+    ax.axhline(-threshold_deg, linestyle="--", color="black", linewidth=1.0)
+    style_handles.append((bound, f"$\\pm${threshold_deg:.0f} deg requirement"))
     mark_stage_transitions(ax, trace_a)
-    ax.set_title(f"Joint Tracking Error Comparison - {trace_a.controller} vs {trace_b.controller}")
+    ax.set_title(f"Joint tracking error: {name_a} (dashed) vs {name_b} (solid)")
     ax.set_xlabel("Time [s]")
-    ax.set_ylabel("Error [deg]")
-    ax.legend(fontsize=8)
+    ax.set_ylabel("Joint position error [deg]")
+    style_legend = ax.legend(*zip(*style_handles), fontsize=9, loc="upper left")
+    ax.add_artist(style_legend)
+    ax.legend(*zip(*joint_handles), fontsize=9, ncol=2, loc="lower left",
+              title="joint (color)", title_fontsize=9)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig(output_path, dpi=200)

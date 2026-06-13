@@ -25,14 +25,33 @@ class TrackingAttachment:
         self.gravity = float(gravity)
         self.attached = False
         self.collision_enabled = True
+        # Clearance (m) to drop the payload below the pinch site on release, so
+        # collisions are re-enabled with the cube clear of the gripper fingers
+        # instead of penetrating them (a deep penetration would otherwise be
+        # resolved with a large impulse that kicks the arm).
+        self.release_clearance = 0.08
         self._ee_site_id = env.model.site(EE_SITE).id
 
     def set_attached(self, attached: bool) -> None:
+        was_attached = self.attached
         self.attached = attached
         if attached and self.collision_enabled:
             self.set_collision(False)
         elif not attached and not self.collision_enabled:
+            if was_attached:
+                self.drop_clear_of_gripper()
             self.set_collision(True)
+
+    def drop_clear_of_gripper(self) -> None:
+        """Move the payload below the pinch site before collisions re-enable."""
+        qpos_addr, qvel_addr = self.freejoint_addresses()
+        ee_xyz, _ = self.env.ee_pose()
+        drop_xyz = ee_xyz + np.array([0.0, 0.0, -self.release_clearance])
+        self.env.data.qpos[qpos_addr : qpos_addr + 3] = drop_xyz
+        self.env.data.qpos[qpos_addr + 3 : qpos_addr + 7] = np.array(
+            [1.0, 0.0, 0.0, 0.0]
+        )
+        self.env.data.qvel[qvel_addr : qvel_addr + 6] = 0.0
 
     def update(self, payload_mass: float) -> None:
         if not self.attached:
