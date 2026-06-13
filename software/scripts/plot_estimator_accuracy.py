@@ -27,15 +27,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from paper_style import ESTIMATOR_STYLE, use_paper_style  # noqa: E402
+
 RESULTS_DIR = Path(__file__).resolve().parents[2] / "results"
 
-# Stable visual identity per estimator across all figures.
-ESTIMATOR_STYLE = {
-    "pid_error":         {"label": "PID-error",        "color": "#1f77b4", "marker": "o", "ls": "-"},
-    "lyapunov":          {"label": "Lyapunov",         "color": "#d62728", "marker": "s", "ls": "-"},
-    "momentum_observer": {"label": "Momentum observer", "color": "#ff7f0e", "marker": "^", "ls": "-"},
-    "inverse_dynamics":  {"label": "Inverse dynamics", "color": "#2ca02c", "marker": "d", "ls": "--"},
-}
 CONTROLLER_TITLE = {
     "pid_tracking": "PD+G tracking controller",
     "inverse_dynamics": "Inverse dynamics (computed-torque) controller",
@@ -52,6 +48,10 @@ def parse_args() -> argparse.Namespace:
                         help="comma-separated subset to plot (default: all in the CSV)")
     parser.add_argument("--output-dir", default=str(RESULTS_DIR / "figures"))
     parser.add_argument("--dpi", type=int, default=300)
+    parser.add_argument("--rename", action="append", default=[],
+                        metavar="ESTIMATOR=LABEL",
+                        help="override a legend label, e.g. --rename pid_error=sPID "
+                        "(repeatable)")
     return parser.parse_args()
 
 
@@ -83,38 +83,38 @@ def series(rows: list[dict], controller: str, estimator: str) -> tuple[np.ndarra
 
 def annotate_mode(fig: plt.Figure, rows: list[dict]) -> None:
     mode = rows[0].get("weigh_mode", "hold")
-    hold = rows[0].get("weigh_time_s", "?")
-    profile = rows[0].get("profile", "?")
+    hold = rows[0].get("weigh_time_s", "")
+    profile = rows[0].get("profile", "")
+    if not profile or not hold:
+        return  # older CSVs lack these columns; omit rather than print "?"
     mode_text = (
         f"weighing during lift motion (hold {hold} s)"
         if mode == "lift"
         else f"stationary weigh hold ({hold} s)"
     )
     fig.text(0.99, 0.005, f"{profile} profile, {mode_text}",
-             ha="right", va="bottom", fontsize=7, color="0.45")
+             ha="right", va="bottom", fontsize=9, color="0.45")
 
 
-def make_figure(controllers: list[str], suptitle: str) -> tuple[plt.Figure, list[plt.Axes]]:
+def make_figure(controllers: list[str]) -> tuple[plt.Figure, list[plt.Axes]]:
     fig, axes = plt.subplots(
-        len(controllers), 1, figsize=(6.4, 3.0 * len(controllers)),
+        len(controllers), 1, figsize=(6.4, 3.4 * len(controllers)),
         sharex=True, constrained_layout=True,
     )
     axes = [axes] if len(controllers) == 1 else list(axes)
-    fig.suptitle(suptitle, fontsize=12)
     return fig, axes
 
 
 def style_axis(ax: plt.Axes, title: str, ylabel: str) -> None:
-    ax.set_title(title, fontsize=10)
-    ax.set_ylabel(ylabel, fontsize=9)
+    ax.set_title(title)
+    ax.set_ylabel(ylabel)
     ax.grid(True, alpha=0.3, linewidth=0.5)
-    ax.tick_params(labelsize=8)
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
 
 
 def plot_estimated_vs_true(rows, controllers, estimators, out: Path, dpi: int) -> None:
-    fig, axes = make_figure(controllers, "Estimated mass vs true payload")
+    fig, axes = make_figure(controllers)
     for ax, controller in zip(axes, controllers):
         lo, hi = np.inf, -np.inf
         for estimator in estimators:
@@ -123,13 +123,13 @@ def plot_estimated_vs_true(rows, controllers, estimators, out: Path, dpi: int) -
                 continue
             st = ESTIMATOR_STYLE[estimator]
             ax.plot(m, m_hat, color=st["color"], marker=st["marker"], ls=st["ls"],
-                    ms=4, lw=1.4, label=st["label"])
+                    label=st["label"])
             lo, hi = min(lo, m.min()), max(hi, m.max())
         ax.plot([lo, hi], [lo, hi], color="black", ls=":", lw=1.0,
                 alpha=0.6, label=r"ideal ($\hat{m} = m$)", zorder=0)
-        style_axis(ax, CONTROLLER_TITLE.get(controller, controller), "estimated mass (kg)")
-    axes[0].legend(fontsize=8, frameon=False, loc="upper left")
-    axes[-1].set_xlabel("true payload mass (kg)", fontsize=9)
+        style_axis(ax, CONTROLLER_TITLE.get(controller, controller), "estimated mass [kg]")
+    axes[0].legend(frameon=False, loc="upper left")
+    axes[-1].set_xlabel("true payload mass [kg]")
     annotate_mode(fig, rows)
     fig.savefig(out, dpi=dpi)
     plt.close(fig)
@@ -137,7 +137,7 @@ def plot_estimated_vs_true(rows, controllers, estimators, out: Path, dpi: int) -
 
 
 def plot_signed_error(rows, controllers, estimators, out: Path, dpi: int) -> None:
-    fig, axes = make_figure(controllers, "Signed estimation error")
+    fig, axes = make_figure(controllers)
     for ax, controller in zip(axes, controllers):
         for estimator in estimators:
             m, m_hat = series(rows, controller, estimator)
@@ -145,12 +145,12 @@ def plot_signed_error(rows, controllers, estimators, out: Path, dpi: int) -> Non
                 continue
             st = ESTIMATOR_STYLE[estimator]
             ax.plot(m, (m_hat - m) * 1000.0, color=st["color"], marker=st["marker"],
-                    ls=st["ls"], ms=4, lw=1.4, label=st["label"])
+                    ls=st["ls"], label=st["label"])
         ax.axhline(0.0, color="black", ls=":", lw=1.0, alpha=0.6, zorder=0)
         style_axis(ax, CONTROLLER_TITLE.get(controller, controller),
-                   r"error  $\hat{m} - m$  (g)")
-    axes[0].legend(fontsize=8, frameon=False, loc="best")
-    axes[-1].set_xlabel("true payload mass (kg)", fontsize=9)
+                   r"error  $\hat{m} - m$  [g]")
+    axes[0].legend(frameon=False, loc="best")
+    axes[-1].set_xlabel("true payload mass [kg]")
     annotate_mode(fig, rows)
     fig.savefig(out, dpi=dpi)
     plt.close(fig)
@@ -158,7 +158,7 @@ def plot_signed_error(rows, controllers, estimators, out: Path, dpi: int) -> Non
 
 
 def plot_relative_error(rows, controllers, estimators, out: Path, dpi: int) -> None:
-    fig, axes = make_figure(controllers, "Absolute relative estimation error")
+    fig, axes = make_figure(controllers)
     for ax, controller in zip(axes, controllers):
         for estimator in estimators:
             m, m_hat = series(rows, controller, estimator)
@@ -168,13 +168,12 @@ def plot_relative_error(rows, controllers, estimators, out: Path, dpi: int) -> N
             rel = np.abs(m_hat - m) / m * 100.0
             # Floor at the float-precision level so log scale stays finite.
             ax.semilogy(m, np.maximum(rel, 1e-7), color=st["color"], marker=st["marker"],
-                        ls=st["ls"], ms=4, lw=1.4, label=st["label"])
-        ax.axhline(5.0, color="black", ls=":", lw=1.0, alpha=0.5, zorder=0)
-        ax.annotate("5 %", xy=(0.995, 5.0), xycoords=("axes fraction", "data"),
-                    ha="right", va="bottom", fontsize=7, color="0.4")
-        style_axis(ax, CONTROLLER_TITLE.get(controller, controller), "|error| (%)")
-    axes[0].legend(fontsize=8, frameon=False, loc="best")
-    axes[-1].set_xlabel("true payload mass (kg)", fontsize=9)
+                        ls=st["ls"], label=st["label"])
+        ax.axhline(5.0, color="black", ls="--", lw=1.0, alpha=0.6, zorder=0,
+                   label="5 % requirement")
+        style_axis(ax, CONTROLLER_TITLE.get(controller, controller), "|error| [%]")
+    axes[0].legend(frameon=False, loc="best", ncol=2)
+    axes[-1].set_xlabel("true payload mass [kg]")
     annotate_mode(fig, rows)
     fig.savefig(out, dpi=dpi)
     plt.close(fig)
@@ -183,8 +182,15 @@ def plot_relative_error(rows, controllers, estimators, out: Path, dpi: int) -> N
 
 def main() -> int:
     args = parse_args()
+    use_paper_style()
     csv_path = Path(args.csv) if args.csv else find_latest_csv()
     rows = load_rows(csv_path)
+
+    for spec in args.rename:
+        estimator, _, label = spec.partition("=")
+        if estimator not in ESTIMATOR_STYLE or not label:
+            raise SystemExit(f"--rename expects ESTIMATOR=LABEL with a known estimator, got '{spec}'")
+        ESTIMATOR_STYLE[estimator]["label"] = label
 
     present = defaultdict(set)
     for row in rows:

@@ -814,13 +814,13 @@ def plot_joint_error_comparison(
     ax.axhline(-threshold_deg, linestyle="--", color="black", linewidth=1.0)
     style_handles.append((bound, f"$\\pm${threshold_deg:.0f} deg requirement"))
     mark_stage_transitions(ax, trace_a)
-    ax.set_title(f"Joint tracking error: {name_a} (dashed) vs {name_b} (solid)")
     ax.set_xlabel("Time [s]")
     ax.set_ylabel("Joint position error [deg]")
-    style_legend = ax.legend(*zip(*style_handles), fontsize=9, loc="upper left")
+    style_legend = ax.legend(*zip(*style_handles), fontsize=11, loc="upper left")
     ax.add_artist(style_legend)
-    ax.legend(*zip(*joint_handles), fontsize=9, ncol=2, loc="lower left",
-              title="joint (color)", title_fontsize=9)
+    ax.legend(*zip(*joint_handles), fontsize=11, ncol=2, loc="lower left",
+              title=f"joint (color); {name_a} dashed, {name_b} solid",
+              title_fontsize=11)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig(output_path, dpi=200)
