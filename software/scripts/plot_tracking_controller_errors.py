@@ -59,9 +59,17 @@ JOINT_COLORS = [
     "tab:brown",
 ]
 CONTROLLER_LABELS = {
-    "pid_tracking": "PD+G_controller",
-    "inverse_dynamics": "inverse_dynamics_controller",
+    "pid_tracking": "PD+G controller",
+    "inverse_dynamics": "Inverse dynamics controller",
 }
+JOINT_DISPLAY = [
+    r"$q_1$ shoulder pan",
+    r"$q_2$ shoulder lift",
+    r"$q_3$ elbow",
+    r"$q_4$ wrist 1",
+    r"$q_5$ wrist 2",
+    r"$q_6$ wrist 3",
+]
 
 
 @dataclass(frozen=True)
@@ -773,23 +781,33 @@ def plot_joint_error_comparison(
     output_path: Path,
     threshold_deg: float = 2.0,
 ) -> None:
+    name_a = controller_label(trace_a.controller)
+    name_b = controller_label(trace_b.controller)
     fig, ax = plt.subplots(figsize=(12, 6))
+    joint_handles = []
     for joint_index in range(len(trace_a.joint_names)):
         color = JOINT_COLORS[joint_index % len(JOINT_COLORS)]
         ax.plot(trace_a.time, err_a[:, joint_index], color=color, linestyle="--", alpha=0.5, linewidth=0.9)
-        ax.plot(trace_b.time, err_b[:, joint_index], color=color, linestyle="-", linewidth=1.2)
-    ax.plot([], [], "k--", linewidth=0.9, label=controller_label(trace_a.controller))
-    ax.plot([], [], "k-", linewidth=1.2, label=controller_label(trace_b.controller))
-    ax.axhline(threshold_deg, linestyle="--", color="black", linewidth=1.0)
-    ax.axhline(-threshold_deg, linestyle="--", color="black", linewidth=1.0, label=f"+/-{threshold_deg:.0f} deg")
+        (line_b,) = ax.plot(trace_b.time, err_b[:, joint_index], color=color, linestyle="-", linewidth=1.2)
+        joint_handles.append((line_b, JOINT_DISPLAY[joint_index % len(JOINT_DISPLAY)]))
+    style_handles = [
+        (ax.plot([], [], "k--", linewidth=0.9)[0], name_a),
+        (ax.plot([], [], "k-", linewidth=1.2)[0], name_b),
+    ]
+    ax.axhline(0.0, linestyle="--", color="gray", linewidth=0.9)
+    bound = ax.axhline(threshold_deg, linestyle="--", color="black", linewidth=1.0)
+    ax.axhline(-threshold_deg, linestyle="--", color="black", linewidth=1.0)
+    style_handles.append((bound, f"$\\pm${threshold_deg:.0f} deg requirement (C1)"))
     mark_stage_transitions(ax, trace_a)
-    ax.set_title(
-        "Joint Tracking Error Comparison - "
-        f"{controller_label(trace_a.controller)} vs {controller_label(trace_b.controller)}"
-    )
-    ax.set_xlabel("Time [s]")
-    ax.set_ylabel("Error [deg]")
-    ax.legend(fontsize=8)
+    # IEEE figures carry their title in the caption, not on the axes.
+    ax.set_xlabel("Time [s]", fontsize=12)
+    ax.set_ylabel("Joint position error [deg]", fontsize=12)
+    ax.tick_params(labelsize=11)
+    style_legend = ax.legend(*zip(*style_handles), fontsize=11, loc="upper left")
+    ax.add_artist(style_legend)
+    ax.legend(*zip(*joint_handles), fontsize=11, ncol=2, loc="lower left",
+              title=f"joint (color); {name_a} dashed, {name_b} solid",
+              title_fontsize=11)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig(output_path, dpi=200)
