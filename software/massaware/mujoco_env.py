@@ -26,6 +26,7 @@ class MujocoEnv:
     def __init__(self, xml_path: str | Path = DEFAULT_SCENE):
         self.model = mujoco.MjModel.from_xml_path(str(xml_path))
         self.data = mujoco.MjData(self.model)
+        self._gravity_data = mujoco.MjData(self.model)
 
         self._ur5e_qpos_adr = np.array(
             [self.model.joint(n).qposadr[0] for n in UR5E_JOINTS]
@@ -59,9 +60,21 @@ class MujocoEnv:
     def set_arm_qpos(self, q: np.ndarray) -> None:
         self.data.qpos[self._ur5e_qpos_adr] = q
 
-    def set_arm_ctrl(self, tau: np.ndarray) -> None:
-        """Inject control torques."""
-        self.data.ctrl[self._ur5e_ctrl_adr] = tau
+    def arm_ctrl_limits(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return per-joint actuator control limits for the UR5e arm."""
+        ctrlrange = self.model.actuator_ctrlrange[self._ur5e_ctrl_adr]
+        return ctrlrange[:, 0].copy(), ctrlrange[:, 1].copy()
+
+    def clip_arm_ctrl(self, tau: np.ndarray) -> np.ndarray:
+        """Clip arm torques to actuator control limits."""
+        lower, upper = self.arm_ctrl_limits()
+        return np.clip(np.asarray(tau, dtype=float), lower, upper)
+
+    def set_arm_ctrl(self, tau: np.ndarray) -> np.ndarray:
+        """Inject control torques and return the clipped actuator command."""
+        tau_clipped = self.clip_arm_ctrl(tau)
+        self.data.ctrl[self._ur5e_ctrl_adr] = tau_clipped
+        return tau_clipped
 
     def get_sensor(self, name: str) -> np.ndarray:
         sensor = self.model.sensor(name)
@@ -78,6 +91,20 @@ class MujocoEnv:
     def qfrc_bias(self) -> np.ndarray:
         """Generalized gravity + Coriolis terms."""
         return self.data.qfrc_bias[self._ur5e_dof_adr].copy()
+
+    def gravity_torque(self, q: np.ndarray | None = None) -> np.ndarray:
+        """Return pure arm gravity torque at q, excluding velocity bias terms."""
+        data = self._gravity_data
+        data.qpos[:] = self.data.qpos
+        if q is not None:
+            data.qpos[self._ur5e_qpos_adr] = np.asarray(q, dtype=float)
+        data.qvel[:] = 0.0
+        data.qacc[:] = 0.0
+        data.ctrl[:] = 0.0
+        data.qfrc_applied[:] = 0.0
+        data.xfrc_applied[:] = 0.0
+        mujoco.mj_forward(self.model, data)
+        return data.qfrc_bias[self._ur5e_dof_adr].copy()
 
     @property
     def actuator_force(self) -> np.ndarray:
@@ -124,4 +151,5 @@ class MujocoEnv:
         self.model.body_mass[bid] = float(new_mass)
         self.model.body_inertia[bid] = self.model.body_inertia[bid] * scale
         mujoco.mj_setConst(self.model, self.data)
+        mujoco.mj_setConst(self.model, self._gravity_data)
         return old_mass

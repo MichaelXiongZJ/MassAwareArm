@@ -58,27 +58,29 @@ This is the central result. The residual $r$ is a first-order low-pass filter on
 
 The construction is sometimes called the De Luca observer after Alessandro De Luca, who developed this form. It has been the workhorse of disturbance estimation in robotics for two decades precisely because it never asks for $\ddot{q}$.
 
-## 3. The static-pose approximation
+## 3. Working with MuJoCo's `qfrc_bias` (no explicit $C$ needed)
 
 The clean derivation above requires the Coriolis-transpose product $C^{\top} \dot{q}$. The MuJoCo simulator does not expose the matrix $C$ directly. It does report the combined quantity `qfrc_bias`, which equals $C \dot{q} + g$. The Coriolis term and the gravity term are mixed together in this single vector.
 
-During the weigh hold, the arm has reached a settled equilibrium. The joint velocities are on the order of a few millirad/s after settling, so the Coriolis term $C \dot{q}$ is at least three orders of magnitude smaller than the gravity term $g$, and is effectively negligible. Under this approximation,
+Fortunately the observer never needs $C$ in isolation. Substituting $\dot{M} = C + C^{\top}$ into $\dot{p} = \tau + \tau_{\text{ext}} + C^{\top}\dot{q} - g$ gives
 
-$$C^{\top} \dot{q} \;\approx\; 0, \qquad g \;\approx\; \text{qfrc\_bias},$$
+$$\dot{p} \;=\; \tau + \tau_{\text{ext}} + \dot{M}\dot{q} - \bigl(C\dot{q} + g\bigr) \;=\; \tau + \tau_{\text{ext}} + \dot{M}\dot{q} - \text{qfrc\_bias},$$
 
-and the observer collapses to
+so the observer becomes
 
-$$\dot{\hat{p}} \;=\; \tau + r - \text{qfrc\_bias}, \qquad r \;=\; K_O \, (p - \hat{p}).$$
+$$\dot{\hat{p}} \;=\; \tau + r + \dot{M}\dot{q} - \text{qfrc\_bias}, \qquad r \;=\; K_O \, (p - \hat{p}).$$
 
-This is the form that lives in the code. The static-pose approximation is what makes the implementation simple. It is also what restricts the observer to weighing at rest. If a future phase wants to weigh during the lift trajectory, the full $C^{\top} \dot{q}$ term must be reinstated, which requires either extracting $C$ via a finite difference on `qfrc_bias` or reformulating the observer in a way that does not need $C$ explicitly.
+The $\dot{M}\dot{q}$ term is recovered per tick by finite-differencing the mass matrix, which the observation interface already provides every tick — no extra simulation queries. This makes the recursion exact during motion, which is what enables weighing during the lift trajectory instead of only at a settled hold. At rest $M$ is constant, the term vanishes, and the recursion reduces to the simpler static-pose form $\dot{\hat{p}} = \tau + r - \text{qfrc\_bias}$ that earlier versions of this estimator used exclusively.
 
 ## 4. Discrete-time recursion
 
 In code, time advances in discrete steps of length $\Delta t$. Applying forward Euler integration to $\hat{p}$, followed by the algebraic evaluation of $r$:
 
-$$\hat{p}_{k+1} \;=\; \hat{p}_k + \Delta t \, \bigl( \tau_k + r_k - \text{qfrc\_bias}_k \bigr),$$
+$$\hat{p}_{k+1} \;=\; \hat{p}_k + \Delta t \, \bigl( \tau_k + r_k - \text{qfrc\_bias}_k \bigr) + \bigl( M_k - M_{k-1} \bigr)\dot{q}_k,$$
 
 $$r_{k+1} \;=\; K_O \, \bigl( p_{k+1} - \hat{p}_{k+1} \bigr).$$
+
+The last term of the $\hat{p}$ update is the finite-difference form of $\dot{M}\dot{q}\,\Delta t$ (the $\Delta t$ cancels); at a stationary hold it is identically zero.
 
 The seeds are $\hat{p}_0 = p_0$ and $r_0 = 0$. Starting with $\hat{p}$ exactly equal to $p$ means the prediction error is zero at the first sample, so the residual builds up only as the dynamics evolve.
 
@@ -108,7 +110,13 @@ $$\boxed{\; \hat{m} \;=\; -\dfrac{\bigl\langle \hat{r} - \hat{r}_{\text{empty}},
 
 The angle brackets denote the dot product, summed over the six joint components. The denominator is just the squared norm of $J_{v,z}$, a single scalar.
 
-The per-tick scatter in $\hat{r}$ propagates through the projection to yield an uncertainty estimate $\sigma_{\hat{m}}$, which the code reports alongside the point estimate.
+When the pose changes during sampling (weighing during the lift motion), $J_{v,z}$ is no longer a constant, so the code solves the equivalent one-parameter least squares **sample-wise** rather than projecting the window means:
+
+$$\hat{m} \;=\; -\dfrac{\sum_k \bigl\langle r_k - \hat{r}_{\text{empty}}, \; \Phi_k \bigr\rangle}{g \sum_k \|\Phi_k\|^2},$$
+
+where $\Phi_k$ is $J_{v,z}$ passed through the same first-order low-pass as $r$ (gain $K_O$), so the regressor carries the same lag as the residual it is fitted against. Samples with negligible leverage $\|\Phi_k\|^2$ are skipped. At a fixed pose $\Phi \to J_{v,z}$ and the sum collapses to the boxed projection above.
+
+The per-tick scatter of the per-sample mass solutions yields an uncertainty estimate $\sigma_{\hat{m}}$, which the code reports alongside the point estimate.
 
 ## 6. Why calibration is still required
 
@@ -138,6 +146,6 @@ Three things deserve attention.
 
 **Degenerate poses.** The projection denominator $\|J_{v,z}\|^2$ is the sum of the squared partial derivatives of end-effector height with respect to each joint angle. If the weigh pose were chosen so that no single-joint perturbation moved the end-effector vertically (for example, with the arm fully extended along a horizontal line), this denominator would collapse and the estimator would be structurally blind to the payload. The current weigh pose has $\|J_{v,z}\|^2$ on the order of 0.4, well away from the degenerate region. The code guards against the edge case anyway: if the denominator drops below numerical tolerance, the estimator returns $\hat{m} = 0$ with $\sigma = \infty$ rather than dividing by something close to zero.
 
-**Quasi-static assumption.** As noted in section 3, the observer in its current implementation is only meaningful when the arm has settled to rest. It is not the right tool for an arm in motion. The full De Luca form does support mid-trajectory weighing in principle, but this requires the full $C^{\top} \dot{q}$ term and a careful analysis of which time windows along the trajectory have well-conditioned Jacobians. That is a stretch goal, not a property of the current implementation.
+**Weighing in motion.** With the $\dot{M}\dot{q}$ correction (section 3) and the sample-wise fit (section 5), the observer supports mid-trajectory weighing: in the tracking pipeline (`mission_tracking.py --collect-lift-samples`) it recovers the payload to sub-gram accuracy while sampling only during the lift segment. Two caveats remain. First, the empty-arm baseline $\hat{r}_{\text{empty}}$ is captured at a fixed pose, and the gripper-linkage bias it absorbs is mildly pose-dependent — see [MOMENTUM_PAUSE_FREE_PLAN.md](MOMENTUM_PAUSE_FREE_PLAN.md). Second, the tracking pipeline models the payload as a pure gravity force at the end-effector; for a *physically grasped* payload in motion, the regressor must be extended with the payload's inertial reaction, $J_v^{\top}(a_{\text{ee}} + g\hat{z})$, which is a planned follow-up rather than a current property.
 
 The momentum observer's distinctive contribution to the case-study comparison is that the time profile of $\hat{r}(t)$ is itself a diagnostic that the other two methods do not produce. Even when all three estimators give compatible mass estimates, watching the residual converge during the weigh hold provides an independent check on the observer's internal consistency. The static methods, which only read the final equilibrium, cannot offer the same.

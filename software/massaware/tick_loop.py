@@ -112,7 +112,9 @@ class TickLoop:
                 use_gravity_comp=False,
             )
             tau = tau + qfrc_bias * ctx.gravity_comp_mask
-            self.env.set_arm_ctrl(tau)
+            # Keep the clipped command: it is what the actuators actually apply,
+            # and what estimators must see as tau_cmd (matches mission_tracking).
+            tau = self.env.set_arm_ctrl(tau)
             self.gripper.apply(ctx.gripper_cmd)
 
             # 3. Physics step

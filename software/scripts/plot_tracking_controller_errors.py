@@ -1,0 +1,829 @@
+"""Plot tracking-controller errors over the full mission or release window."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+
+import matplotlib
+import mujoco
+import numpy as np
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+SOFTWARE_ROOT = Path(__file__).resolve().parents[1]
+if str(SOFTWARE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SOFTWARE_ROOT))
+
+from massaware.classify import classify_mass
+from massaware.config import load_config
+from massaware.controllers.attachment import TrackingAttachment
+from massaware.controllers.ik import make_tracking_ik, solve_tracking_ik
+from massaware.controllers.profiles import TrackingProfile, tracking_profile
+from massaware.controllers.references import JointReference
+from massaware.controllers.trajectory import (
+    JointTrajectory,
+    make_release_trajectory,
+    release_approach_target,
+    release_target,
+    release_time,
+)
+from massaware.estimators import inverse_dynamics as _inverse_dynamics  # noqa: F401
+from massaware.estimators.base import Estimator
+from massaware.mujoco_env import MujocoEnv, UR5E_JOINTS
+from massaware.robot import Robot
+from massaware.tick_loop import Gripper, GripperCmd
+
+from mission_tracking import (
+    CUBE_BODY,
+    build_obs,
+    make_controller,
+    make_estimator,
+    make_pick_weigh_plan,
+)
+
+AXIS_LABELS = ["x", "y", "z"]
+AXIS_COLORS = ["tab:red", "tab:green", "tab:blue"]
+JOINT_COLORS = [
+    "tab:blue",
+    "tab:orange",
+    "tab:green",
+    "tab:red",
+    "tab:purple",
+    "tab:brown",
+]
+CONTROLLER_LABELS = {
+    "pid_tracking": "PD+G controller",
+    "inverse_dynamics": "Inverse dynamics controller",
+}
+JOINT_DISPLAY = [
+    r"$q_1$ shoulder pan",
+    r"$q_2$ shoulder lift",
+    r"$q_3$ elbow",
+    r"$q_4$ wrist 1",
+    r"$q_5$ wrist 2",
+    r"$q_6$ wrist 3",
+]
+
+
+@dataclass(frozen=True)
+class TrackingTrace:
+    controller: str
+    profile: str
+    mass: float
+    payload_comp_mode: str
+    joint_names: list[str]
+    time: np.ndarray
+    q: np.ndarray
+    q_dot: np.ndarray
+    q_ref: np.ndarray
+    q_dot_ref: np.ndarray
+    # Raw controller torque demand, before actuator ctrlrange clipping.
+    tau: np.ndarray
+    tau_clipped: np.ndarray
+    tau_feedback: np.ndarray
+    tau_feedforward: np.ndarray
+    tau_payload: np.ndarray
+    tau_gravity: np.ndarray
+    tau_bias: np.ndarray
+    torque_min: np.ndarray
+    torque_max: np.ndarray
+    stage_transitions: list[tuple[float, str]]
+    actual_position: np.ndarray
+    desired_position: np.ndarray
+    orientation_error: np.ndarray
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--controllers",
+        nargs="+",
+        choices=["pid_tracking", "inverse_dynamics"],
+        default=["pid_tracking", "inverse_dynamics"],
+    )
+    parser.add_argument("--profile", choices=["tracking", "main"], default="tracking")
+    parser.add_argument("--mass", type=float, default=0.5)
+    parser.add_argument("--move-to-grasp-time", type=float, default=3.0)
+    parser.add_argument("--lift-to-weigh-time", type=float, default=2.0)
+    parser.add_argument("--move-to-release-time", type=float, default=None)
+    parser.add_argument("--weigh-time", type=float, default=None)
+    parser.add_argument(
+        "--payload-comp-mode",
+        choices=["oracle", "estimated", "none"],
+        default="oracle",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=str(SOFTWARE_ROOT / "output" / "tracking_controller_error_plots"),
+    )
+    parser.add_argument(
+        "--time-window",
+        choices=["full", "release"],
+        default="full",
+        help="plot the full mission or only the payload-carrying release motion",
+    )
+    parser.add_argument("--joint-threshold-deg", type=float, default=2.0)
+    parser.add_argument("--ee-threshold-mm", type=float, default=5.0)
+    parser.add_argument(
+        "--include-ee-plots",
+        action="store_true",
+        help="also generate end-effector position/orientation plots",
+    )
+    parser.add_argument(
+        "--skip-ee-plots",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument("--torque-ratio", type=float, default=0.95)
+    parser.add_argument(
+        "--disable-controller-overrides",
+        action="store_true",
+        help="ignore estimator-requested gain overrides during weighing",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    cfg = load_config()
+    profile = tracking_profile(args.profile, cfg)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    traces: dict[str, TrackingTrace] = {}
+    joint_errors: dict[str, np.ndarray] = {}
+
+    for controller_name in args.controllers:
+        full_trace = run_controller_trace(
+            cfg,
+            profile,
+            controller_name,
+            mass=args.mass,
+            payload_comp_mode=args.payload_comp_mode,
+            move_to_grasp_time=args.move_to_grasp_time,
+            lift_to_weigh_time=args.lift_to_weigh_time,
+            move_to_release_time=release_time(args.move_to_release_time, profile),
+            weigh_time=args.weigh_time,
+            allow_controller_overrides=not args.disable_controller_overrides,
+        )
+        trace = select_time_window(full_trace, args.time_window)
+        traces[controller_name] = trace
+        prefix = output_dir / controller_name
+        suffix = "" if args.time_window == "full" else f"_{args.time_window}"
+        plot_joint_angles_velocities(
+            trace,
+            prefix.with_name(f"{controller_name}{suffix}_joint_angles_velocities.png"),
+        )
+        joint_errors[controller_name] = plot_joint_errors(
+            trace,
+            prefix.with_name(f"{controller_name}{suffix}_joint_position_error.png"),
+            threshold_deg=args.joint_threshold_deg,
+        )
+        plot_joint_torques(
+            trace,
+            prefix.with_name(f"{controller_name}{suffix}_joint_torques.png"),
+        )
+        print_window_metrics(trace, args.joint_threshold_deg, args.torque_ratio)
+
+        if args.include_ee_plots and not args.skip_ee_plots:
+            plot_ee_position(trace, prefix.with_name(f"{controller_name}{suffix}_ee_position.png"))
+            plot_ee_error(
+                trace,
+                prefix.with_name(f"{controller_name}{suffix}_ee_position_error.png"),
+                threshold_m=args.ee_threshold_mm / 1000.0,
+            )
+            plot_orientation_error(
+                trace,
+                prefix.with_name(f"{controller_name}{suffix}_ee_orientation_error.png"),
+            )
+
+    if "pid_tracking" in traces and "inverse_dynamics" in traces:
+        plot_joint_error_comparison(
+            traces["pid_tracking"],
+            joint_errors["pid_tracking"],
+            traces["inverse_dynamics"],
+            joint_errors["inverse_dynamics"],
+            output_dir / f"pid_tracking_vs_inverse_dynamics{suffix}_joint_error_comparison.png",
+            threshold_deg=args.joint_threshold_deg,
+        )
+
+    print(f"wrote plots to {output_dir}")
+    return 0
+
+
+def run_controller_trace(
+    cfg: dict,
+    profile: TrackingProfile,
+    controller_name: str,
+    *,
+    mass: float,
+    payload_comp_mode: str,
+    move_to_grasp_time: float,
+    lift_to_weigh_time: float,
+    move_to_release_time: float,
+    weigh_time: float | None,
+    allow_controller_overrides: bool = True,
+    estimator_name: str = "inverse_dynamics",
+) -> TrackingTrace:
+    env = MujocoEnv()
+    env.set_body_mass(CUBE_BODY, mass)
+    env.reset(arm_qpos=cfg["poses"]["home_qpos"])
+    robot = Robot(env)
+    gripper = Gripper(env)
+    controller = make_controller(
+        controller_name,
+        env,
+        robot,
+        cfg,
+        profile,
+        allow_overrides=allow_controller_overrides,
+    )
+    estimator = make_estimator(estimator_name, cfg, profile, controller_name)
+
+    cube_xyz = env.data.xpos[env.model.body(CUBE_BODY).id].copy()
+    active = make_pick_weigh_plan(
+        env,
+        robot,
+        cfg,
+        profile,
+        cube_xyz,
+        move_to_grasp_time=move_to_grasp_time,
+        lift_to_weigh_time=lift_to_weigh_time,
+        weigh_time=weigh_time,
+    )
+
+    times: list[float] = []
+    q_values: list[np.ndarray] = []
+    q_dot_values: list[np.ndarray] = []
+    q_ref_values: list[np.ndarray] = []
+    q_dot_ref_values: list[np.ndarray] = []
+    tau_values: list[np.ndarray] = []
+    tau_clipped_values: list[np.ndarray] = []
+    tau_feedback_values: list[np.ndarray] = []
+    tau_feedforward_values: list[np.ndarray] = []
+    tau_payload_values: list[np.ndarray] = []
+    tau_gravity_values: list[np.ndarray] = []
+    tau_bias_values: list[np.ndarray] = []
+    actual_positions: list[np.ndarray] = []
+    desired_positions: list[np.ndarray] = []
+    orientation_errors: list[np.ndarray] = []
+    stage_transitions: list[tuple[float, str]] = []
+
+    phase = "pick_weigh"
+    start_time = env.data.time
+    last_stage = None
+    overrides_active = False
+    estimated_mass = 0.0
+    release_bin = classify_mass(mass, float(cfg["classifier"]["mass_threshold"]))
+    attachment = TrackingAttachment(env, robot, CUBE_BODY)
+
+    try:
+        while True:
+            elapsed = env.data.time - start_time
+            sample = active.sample(elapsed)
+
+            if sample.done:
+                if phase == "pick_weigh":
+                    if overrides_active:
+                        controller.clear_overrides()
+                        overrides_active = False
+                    estimated_mass = estimate_payload_mass(
+                        estimator,
+                        fallback=mass if payload_comp_mode == "oracle" else None,
+                    )
+                    if payload_comp_mode == "estimated":
+                        release_bin = classify_mass(
+                            estimated_mass,
+                            float(cfg["classifier"]["mass_threshold"]),
+                        )
+                    q_start = env.get_arm_qpos()
+                    release_xyz = release_target(profile, cfg, release_bin)
+                    release_approach_xyz = release_approach_target(profile, release_xyz)
+                    target_orientation = env.ee_pose()[1]
+                    ik_solver = (
+                        make_tracking_ik(env)
+                        if profile.use_analytical_ik
+                        else None
+                    )
+                    q_release_approach = solve_tracking_ik(
+                        robot,
+                        release_approach_xyz,
+                        q_start,
+                        f"{release_bin}_release_approach",
+                        ik_solver=ik_solver,
+                        target_orientation=target_orientation,
+                    )
+                    q_release = solve_tracking_ik(
+                        robot,
+                        release_xyz,
+                        q_release_approach,
+                        f"{release_bin}_release",
+                        ik_solver=ik_solver,
+                        target_orientation=target_orientation,
+                    )
+                    active = make_release_trajectory(
+                        q_initial=q_start,
+                        q_release_approach=q_release_approach,
+                        q_release=q_release,
+                        move_to_release_time=move_to_release_time,
+                        release_hold_time=profile.release_hold_time,
+                        blend_time_fraction=profile.blend_time_fraction,
+                    )
+                    start_time = env.data.time
+                    phase = "release"
+                    last_stage = None
+                    continue
+                break
+
+            if sample.stage != last_stage:
+                stage_transitions.append((env.data.time, sample.stage))
+                if sample.collect_mass_samples:
+                    overrides_active = controller.apply_overrides(
+                        estimator.controller_overrides()
+                    )
+                elif overrides_active:
+                    controller.clear_overrides()
+                    overrides_active = False
+                last_stage = sample.stage
+
+            attachment.set_attached(sample.gripper_closed)
+            if sample.stage in {"release", "done"}:
+                attachment.set_attached(False)
+
+            env.data.qfrc_applied[:] = 0.0
+            mujoco.mj_forward(env.model, env.data)
+            attachment.update(mass)
+
+            desired_position, desired_rotation = robot.fk(sample.q)
+            actual_position, actual_rotation = env.ee_pose()
+            q = env.get_arm_qpos()
+            q_dot = env.get_arm_qvel()
+            reference = JointReference(sample.q, sample.q_dot, sample.q_ddot)
+            gravity_mask = (
+                estimator.gravity_comp_mask(6)
+                if sample.collect_mass_samples
+                else np.ones(6)
+            )
+            controller_payload_mass = controller_payload(
+                payload_comp_mode,
+                sample,
+                true_mass=mass,
+                estimated_mass=estimated_mass,
+            )
+            output = controller.command(
+                reference,
+                gravity_mask=gravity_mask,
+                payload_mass=controller_payload_mass,
+            )
+            gripper.apply(GripperCmd.CLOSE if sample.gripper_closed else GripperCmd.OPEN)
+
+            times.append(env.data.time)
+            q_values.append(q)
+            q_dot_values.append(q_dot)
+            q_ref_values.append(sample.q.copy())
+            q_dot_ref_values.append(sample.q_dot.copy())
+            tau_values.append(output.tau_cmd_raw.copy())
+            tau_clipped_values.append(output.tau_cmd_clipped.copy())
+            tau_feedback_values.append(output.tau_feedback.copy())
+            tau_feedforward_values.append(output.tau_feedforward.copy())
+            tau_payload_values.append(output.tau_payload.copy())
+            tau_gravity_values.append(output.tau_gravity.copy())
+            tau_bias_values.append(output.tau_bias.copy())
+            actual_positions.append(actual_position)
+            desired_positions.append(desired_position)
+            orientation_errors.append(
+                orientation_error_xyz_euler(desired_rotation, actual_rotation)
+            )
+
+            mujoco.mj_step(env.model, env.data)
+
+            if sample.collect_mass_samples:
+                estimator.update(build_obs(env, robot, sample.q, output.tau_cmd))
+    finally:
+        if overrides_active:
+            controller.clear_overrides()
+        attachment.restore()
+
+    return TrackingTrace(
+        controller=controller_name,
+        profile=profile.name,
+        mass=mass,
+        payload_comp_mode=payload_comp_mode,
+        joint_names=list(UR5E_JOINTS),
+        time=relative_time(np.array(times)),
+        q=np.vstack(q_values),
+        q_dot=np.vstack(q_dot_values),
+        q_ref=np.vstack(q_ref_values),
+        q_dot_ref=np.vstack(q_dot_ref_values),
+        tau=np.vstack(tau_values),
+        tau_clipped=np.vstack(tau_clipped_values),
+        tau_feedback=np.vstack(tau_feedback_values),
+        tau_feedforward=np.vstack(tau_feedforward_values),
+        tau_payload=np.vstack(tau_payload_values),
+        tau_gravity=np.vstack(tau_gravity_values),
+        tau_bias=np.vstack(tau_bias_values),
+        torque_min=actuator_ctrl_limits(env)[0],
+        torque_max=actuator_ctrl_limits(env)[1],
+        stage_transitions=relative_stage_times(stage_transitions, times[0] if times else 0.0),
+        actual_position=np.vstack(actual_positions),
+        desired_position=np.vstack(desired_positions),
+        orientation_error=np.vstack(orientation_errors),
+    )
+
+
+def estimate_payload_mass(estimator: Estimator, fallback: float | None) -> float:
+    try:
+        return float(estimator.estimate().m_hat)
+    except RuntimeError:
+        if fallback is None:
+            raise
+        return float(fallback)
+
+
+def controller_payload(
+    payload_comp_mode: str,
+    sample,
+    *,
+    true_mass: float,
+    estimated_mass: float,
+) -> float:
+    if not sample.compensate_payload or sample.collect_mass_samples:
+        return 0.0
+    scale = float(sample.payload_comp_scale)
+    if payload_comp_mode == "oracle":
+        return true_mass * scale
+    if payload_comp_mode == "estimated":
+        return estimated_mass * scale
+    return 0.0
+
+
+def actuator_ctrl_limits(env: MujocoEnv) -> tuple[np.ndarray, np.ndarray]:
+    return env.arm_ctrl_limits()
+
+
+def parse_float_csv(value: str) -> list[float]:
+    return [float(item) for item in value.split(",") if item.strip()]
+
+
+def fmt(value: float) -> str:
+    if np.isnan(value):
+        return "nan"
+    return f"{value:.3f}"
+
+
+def relative_time(times: np.ndarray) -> np.ndarray:
+    if len(times) == 0:
+        return times
+    return times - times[0]
+
+
+def relative_stage_times(
+    stage_transitions: list[tuple[float, str]],
+    start_time: float,
+) -> list[tuple[float, str]]:
+    return [(time - start_time, stage) for time, stage in stage_transitions]
+
+
+def select_time_window(trace: TrackingTrace, time_window: str) -> TrackingTrace:
+    if time_window == "full":
+        return trace
+    if time_window == "release":
+        return release_motion_window(trace)
+    raise ValueError(f"Unknown time window '{time_window}'")
+
+
+def release_motion_window(trace: TrackingTrace) -> TrackingTrace:
+    start = stage_time(trace, "move_to_release_approach")
+    end = stage_time(trace, "release")
+    if start is None:
+        raise RuntimeError("Trace has no move_to_release_approach stage")
+    if end is None:
+        end = float(trace.time[-1])
+
+    mask = (trace.time >= start) & (trace.time < end)
+    if not np.any(mask):
+        raise RuntimeError("Release-motion window is empty")
+
+    indices = np.flatnonzero(mask)
+    first = int(indices[0])
+    last = int(indices[-1]) + 1
+    time = trace.time[first:last] - trace.time[first]
+    transitions = [
+        (stage_t - trace.time[first], stage)
+        for stage_t, stage in trace.stage_transitions
+        if trace.time[first] <= stage_t < trace.time[last - 1] + 1e-9
+    ]
+
+    return TrackingTrace(
+        controller=trace.controller,
+        profile=trace.profile,
+        mass=trace.mass,
+        payload_comp_mode=trace.payload_comp_mode,
+        joint_names=trace.joint_names,
+        time=time,
+        q=trace.q[first:last],
+        q_dot=trace.q_dot[first:last],
+        q_ref=trace.q_ref[first:last],
+        q_dot_ref=trace.q_dot_ref[first:last],
+        tau=trace.tau[first:last],
+        tau_clipped=trace.tau_clipped[first:last],
+        tau_feedback=trace.tau_feedback[first:last],
+        tau_feedforward=trace.tau_feedforward[first:last],
+        tau_payload=trace.tau_payload[first:last],
+        tau_gravity=trace.tau_gravity[first:last],
+        tau_bias=trace.tau_bias[first:last],
+        torque_min=trace.torque_min,
+        torque_max=trace.torque_max,
+        stage_transitions=transitions,
+        actual_position=trace.actual_position[first:last],
+        desired_position=trace.desired_position[first:last],
+        orientation_error=trace.orientation_error[first:last],
+    )
+
+
+def stage_time(trace: TrackingTrace, stage_name: str) -> float | None:
+    for time, stage in trace.stage_transitions:
+        if stage == stage_name:
+            return float(time)
+    return None
+
+
+def print_window_metrics(
+    trace: TrackingTrace,
+    joint_peak_limit_deg: float,
+    torque_ratio_limit: float,
+) -> None:
+    metrics = tracking_metrics(trace)
+    status = (
+        "PASS"
+        if metrics["joint_peak"] <= joint_peak_limit_deg
+        and metrics["torque_ratio"] <= torque_ratio_limit
+        else "FAIL"
+    )
+    print(
+        f"{trace.controller}: window "
+        f"joint_rms={metrics['joint_rms']:.3f} deg, "
+        f"joint_peak={metrics['joint_peak']:.3f} deg, "
+        f"ee_rms={metrics['ee_rms']:.3f} mm, "
+        f"ee_peak={metrics['ee_peak']:.3f} mm, "
+        f"tau/lim={metrics['torque_ratio']:.3f}, {status}"
+    )
+
+
+def tracking_metrics(trace: TrackingTrace) -> dict[str, float]:
+    joint_err_deg = np.rad2deg(trace.q_ref - trace.q)
+    ee_err_mm = (trace.desired_position - trace.actual_position) * 1000.0
+    torque_limit = np.maximum(np.abs(trace.torque_min), np.abs(trace.torque_max))
+    return {
+        "joint_rms": float(np.sqrt(np.mean(joint_err_deg**2))),
+        "joint_peak": float(np.max(np.abs(joint_err_deg))),
+        "ee_rms": float(np.sqrt(np.mean(ee_err_mm**2))),
+        "ee_peak": float(np.max(np.linalg.norm(ee_err_mm, axis=1))),
+        "max_tau": float(np.max(np.abs(trace.tau))),
+        "torque_ratio": float(np.max(np.abs(trace.tau) / torque_limit)),
+    }
+
+
+def xyz_euler_from_rotation(rotation: np.ndarray) -> np.ndarray:
+    sy = float(np.sqrt(rotation[0, 0] ** 2 + rotation[1, 0] ** 2))
+    singular = sy < 1e-9
+    if singular:
+        x = np.arctan2(-rotation[1, 2], rotation[1, 1])
+        y = np.arctan2(-rotation[2, 0], sy)
+        z = 0.0
+    else:
+        x = np.arctan2(rotation[2, 1], rotation[2, 2])
+        y = np.arctan2(-rotation[2, 0], sy)
+        z = np.arctan2(rotation[1, 0], rotation[0, 0])
+    return np.array([x, y, z])
+
+
+def wrap_angle(angle: np.ndarray) -> np.ndarray:
+    return (angle + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def orientation_error_xyz_euler(
+    desired_rotation: np.ndarray,
+    actual_rotation: np.ndarray,
+) -> np.ndarray:
+    return wrap_angle(
+        xyz_euler_from_rotation(desired_rotation)
+        - xyz_euler_from_rotation(actual_rotation)
+    )
+
+
+def mark_stage_transitions(ax: plt.Axes, trace: TrackingTrace) -> None:
+    for index, (time, stage) in enumerate(trace.stage_transitions):
+        if time <= trace.time[0] + 1e-9:
+            continue
+        label = "stage change" if index == 1 else None
+        ax.axvline(time, linestyle="--", color="black", linewidth=0.6, alpha=0.35, label=label)
+
+
+def plot_joint_angles_velocities(trace: TrackingTrace, output_path: Path) -> None:
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+    for joint_index, _joint_name in enumerate(trace.joint_names):
+        color = JOINT_COLORS[joint_index % len(JOINT_COLORS)]
+        label = f"joint {joint_index + 1}"
+        ax1.plot(trace.time, np.rad2deg(trace.q[:, joint_index]), color=color, linewidth=1.2, label=label)
+        ax1.plot(trace.time, np.rad2deg(trace.q_ref[:, joint_index]), color=color, linestyle="--", linewidth=0.8)
+        ax2.plot(trace.time, np.rad2deg(trace.q_dot[:, joint_index]), color=color, linewidth=1.2, label=label)
+        ax2.plot(trace.time, np.rad2deg(trace.q_dot_ref[:, joint_index]), color=color, linestyle="--", linewidth=0.8)
+    mark_stage_transitions(ax1, trace)
+    mark_stage_transitions(ax2, trace)
+    ax1.plot([], [], color="black", linestyle="-", linewidth=1.2, label="actual")
+    ax1.plot([], [], color="black", linestyle="--", linewidth=0.8, label="desired")
+    ax1.set_title(title(trace, "Joint Angles vs Time"))
+    ax1.set_ylabel("Joint Angle [deg]")
+    ax1.legend(ncol=4, fontsize=7)
+    ax1.grid(True, alpha=0.3)
+    ax2.set_title(title(trace, "Joint Velocities vs Time"))
+    ax2.set_xlabel("Time [s]")
+    ax2.set_ylabel("Joint Velocity [deg/s]")
+    ax2.legend(ncol=3, fontsize=7)
+    ax2.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def plot_joint_errors(
+    trace: TrackingTrace,
+    output_path: Path,
+    threshold_deg: float = 2.0,
+) -> np.ndarray:
+    err_deg = np.rad2deg(trace.q_ref - trace.q)
+    fig, ax = plt.subplots(figsize=(10, 5))
+    for joint_index in range(len(trace.joint_names)):
+        color = JOINT_COLORS[joint_index % len(JOINT_COLORS)]
+        ax.plot(trace.time, err_deg[:, joint_index], color=color, linewidth=1.2, label=f"joint {joint_index + 1}")
+    ax.axhline(threshold_deg, linestyle="--", color="black", linewidth=1.0, label=f"+/-{threshold_deg:.0f} deg")
+    ax.axhline(-threshold_deg, linestyle="--", color="black", linewidth=1.0)
+    mark_stage_transitions(ax, trace)
+    ax.set_title(title(trace, "Joint Position Error vs Time"))
+    ax.set_xlabel("Time [s]")
+    ax.set_ylabel("Position Error [deg]")
+    ax.legend(ncol=3, fontsize=7)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+    print(f"{trace.controller}: peak |joint error| [deg] {np.max(np.abs(err_deg), axis=0).round(4)}")
+    return err_deg
+
+
+def plot_joint_torques(trace: TrackingTrace, output_path: Path) -> None:
+    fig, ax = plt.subplots(figsize=(11, 5))
+    for joint_index in range(len(trace.joint_names)):
+        color = JOINT_COLORS[joint_index % len(JOINT_COLORS)]
+        ax.plot(
+            trace.time,
+            trace.tau[:, joint_index],
+            color=color,
+            linewidth=1.0,
+            linestyle="--",
+            label=fr"$\tau_{{raw,{joint_index + 1}}}$",
+        )
+        ax.plot(
+            trace.time,
+            trace.tau_clipped[:, joint_index],
+            color=color,
+            linewidth=1.3,
+            label=fr"$\tau_{{clip,{joint_index + 1}}}$",
+        )
+        ax.axhline(trace.torque_max[joint_index], linestyle=":", color="gray", linewidth=0.6)
+        ax.axhline(trace.torque_min[joint_index], linestyle=":", color="gray", linewidth=0.6)
+    mark_stage_transitions(ax, trace)
+    ax.set_title(title(trace, "Joint Torque Demand/Clipped Command vs Time"))
+    ax.set_xlabel("Time [s]")
+    ax.set_ylabel("Torque [N-m]")
+    ax.legend(ncol=4, fontsize=7)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def plot_ee_position(trace: TrackingTrace, output_path: Path) -> None:
+    fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+    for index, ax in enumerate(axes):
+        ax.plot(trace.time, trace.actual_position[:, index], color="red", linewidth=1.5, label="actual")
+        ax.plot(trace.time, trace.desired_position[:, index], color="black", linestyle="--", linewidth=1.0, label="desired")
+        ax.set_ylabel(f"{AXIS_LABELS[index]} [m]")
+        ax.legend(loc="best", fontsize=8)
+        ax.grid(True, alpha=0.3)
+    axes[0].set_title(title(trace, "End-Effector Position vs Time"))
+    axes[-1].set_xlabel("Time [s]")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def plot_ee_error(
+    trace: TrackingTrace,
+    output_path: Path,
+    threshold_m: float = 0.005,
+) -> np.ndarray:
+    err_m = trace.desired_position - trace.actual_position
+    fig, ax = plt.subplots(figsize=(10, 5))
+    for index in range(3):
+        ax.plot(trace.time, err_m[:, index], color=AXIS_COLORS[index], linewidth=1.4, label=f"{AXIS_LABELS[index]} error")
+    ax.axhline(threshold_m, linestyle="--", color="black", linewidth=1.0, label=f"+/-{threshold_m * 1000.0:.0f} mm")
+    ax.axhline(-threshold_m, linestyle="--", color="black", linewidth=1.0)
+    ax.set_title(title(trace, "End-Effector Position Error vs Time"))
+    ax.set_xlabel("Time [s]")
+    ax.set_ylabel("Position Error [m]")
+    ax.legend(ncol=4, fontsize=8)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+    print(f"{trace.controller}: final |EE position error| [mm] {(np.abs(err_m[-1]) * 1000.0).round(3)}")
+    return err_m
+
+
+def plot_orientation_error(
+    trace: TrackingTrace,
+    output_path: Path,
+    threshold_deg: float = 1.0,
+) -> np.ndarray:
+    err_deg = np.rad2deg(trace.orientation_error)
+    err_norm_deg = np.rad2deg(np.linalg.norm(trace.orientation_error, axis=1))
+    fig, ax = plt.subplots(figsize=(10, 5))
+    for index in range(3):
+        ax.plot(trace.time, err_deg[:, index], color=AXIS_COLORS[index], linewidth=1.4, label=f"{AXIS_LABELS[index]} error")
+    ax.plot(trace.time, err_norm_deg, color="black", linestyle="--", linewidth=1.0, label="norm")
+    ax.axhline(threshold_deg, linestyle=":", color="black", linewidth=0.8, label=f"+/-{threshold_deg:.1f} deg")
+    ax.axhline(-threshold_deg, linestyle=":", color="black", linewidth=0.8)
+    ax.set_title(title(trace, "End-Effector Orientation Error vs Time"))
+    ax.set_xlabel("Time [s]")
+    ax.set_ylabel("XYZ Euler Error [deg]")
+    ax.legend(ncol=5, fontsize=8)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+    return err_deg
+
+
+def plot_joint_error_comparison(
+    trace_a: TrackingTrace,
+    err_a: np.ndarray,
+    trace_b: TrackingTrace,
+    err_b: np.ndarray,
+    output_path: Path,
+    threshold_deg: float = 2.0,
+) -> None:
+    name_a = controller_label(trace_a.controller)
+    name_b = controller_label(trace_b.controller)
+    fig, ax = plt.subplots(figsize=(12, 6))
+    joint_handles = []
+    for joint_index in range(len(trace_a.joint_names)):
+        color = JOINT_COLORS[joint_index % len(JOINT_COLORS)]
+        ax.plot(trace_a.time, err_a[:, joint_index], color=color, linestyle="--", alpha=0.5, linewidth=0.9)
+        (line_b,) = ax.plot(trace_b.time, err_b[:, joint_index], color=color, linestyle="-", linewidth=1.2)
+        joint_handles.append((line_b, JOINT_DISPLAY[joint_index % len(JOINT_DISPLAY)]))
+    style_handles = [
+        (ax.plot([], [], "k--", linewidth=0.9)[0], name_a),
+        (ax.plot([], [], "k-", linewidth=1.2)[0], name_b),
+    ]
+    ax.axhline(0.0, linestyle="--", color="gray", linewidth=0.9)
+    bound = ax.axhline(threshold_deg, linestyle="--", color="black", linewidth=1.0)
+    ax.axhline(-threshold_deg, linestyle="--", color="black", linewidth=1.0)
+    style_handles.append((bound, f"$\\pm${threshold_deg:.0f} deg requirement (C1)"))
+    mark_stage_transitions(ax, trace_a)
+    # IEEE figures carry their title in the caption, not on the axes.
+    ax.set_xlabel("Time [s]", fontsize=12)
+    ax.set_ylabel("Joint position error [deg]", fontsize=12)
+    ax.tick_params(labelsize=11)
+    style_legend = ax.legend(*zip(*style_handles), fontsize=11, loc="upper left")
+    ax.add_artist(style_legend)
+    ax.legend(*zip(*joint_handles), fontsize=11, ncol=2, loc="lower left",
+              title=f"joint (color); {name_a} dashed, {name_b} solid",
+              title_fontsize=11)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def title(trace: TrackingTrace, text: str) -> str:
+    return (
+        f"{controller_label(trace.controller)} - {text} "
+        f"(profile={trace.profile}, mass={trace.mass:.2f}kg, payload={trace.payload_comp_mode})"
+    )
+
+
+def controller_label(controller: str) -> str:
+    return CONTROLLER_LABELS.get(controller, controller)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
