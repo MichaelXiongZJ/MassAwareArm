@@ -1,21 +1,42 @@
 # MassAwareArm
 
-MAE C263C Project, Team 8 Armstrong. A simulated UR5e in MuJoCo picks a cube off a conveyor, infers the cube's mass without a force sensor or any external scale, and drops it in the correct bin. The point of the project is not the pick-and-place: it is the comparison between several mass estimators that can be slotted into the same arm and judged side by side.
+**Autonomous Mass-Aware Sorting System** — MAE C163C/C263C Final Project, Team 8 (Armstrong), Spring 2026.
 
-Three estimators are implemented. The PID-error method reads the controller's steady-state torque command at a single joint while gravity compensation is selectively disabled, and converts that torque to a payload mass through a known geometric moment arm. The Lyapunov method leaves gravity compensation on, softens the controller into a multi-dimensional spring, lets the arm sag a few millimetres under the payload, and recovers the mass from the energy balance between spring storage and gravitational potential. The momentum observer integrates the joint-space dynamics through a generalized-momentum residual whose steady-state value is the external joint torque, and recovers the mass by projecting that residual onto the end-effector Jacobian. The three methods read different sensor channels (joint torque, joint position, and time-integrated momentum), so they fail in different ways. That is the property the case study is designed to expose.
+A simulated UR5e with a Robotiq 2F-85 gripper picks a cube off a conveyor in MuJoCo, infers the cube's mass **without any force/torque sensor or external scale**, classifies it light/heavy against a threshold, and drops it in the matching bin. The point of the project is not the pick-and-place: it is the side-by-side comparison of mass estimators and tracking controllers that all share one interface and are judged against common, quantified requirements.
 
-If you want the underlying maths and physics for each method, see:
+The full write-up — per-method derivations, system design, and figures — is in [docs/references/8_Final Report.pdf](docs/references/8_Final%20Report.pdf) (with the proposal and final presentation alongside it in [docs/references/](docs/references/)).
 
-- [docs/PID_ERROR.md](docs/PID_ERROR.md) for the PID-error estimator
-- [docs/LYAPUNOV.md](docs/LYAPUNOV.md) for the Lyapunov (spring-sag) estimator
-- [docs/MOMENTUM_OBSERVER.md](docs/MOMENTUM_OBSERVER.md) for the momentum-observer estimator
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the layered system design
+## What's compared
+
+**Four mass estimators**, each reading a different signal so they fail in different ways:
+
+| Estimator (`name`) | Reads | Calibration | One-line physics |
+|---|---|---|---|
+| `pid_error` (sPID) | elbow steady torque | yes | Disable gravity comp at one joint; its steady torque minus the empty baseline equals `m·g·d` |
+| `lyapunov` (energy-balance / spring-sag) | joint positions, EE height | yes | Soften the gains; the arm sags; an energy balance gives `m = 2ΔE_spring/(g·Δh)` |
+| `momentum_observer` | momentum residual | yes | Generalized-momentum disturbance observer; residual → external torque, projected onto the EE Jacobian. **Weighs during motion** |
+| `inverse_dynamics` | per-tick residual torque | **no** | Regress `τ − bias` against the per-kg gravity regressor; gates out dynamic samples, so it weighs during gentle motion with no baseline |
+
+**Two trajectory-tracking controllers** for the pick-and-place motion, with the estimated mass fed forward as payload compensation: `pid_tracking` (PD + gravity comp) and `inverse_dynamics` (computed-torque).
+
+**Headline results** (10 g–3 kg sweep): the **momentum observer is the most accurate estimator (0.9 % RMSE)** and the only one meeting the 5 % requirement over the full range; the **inverse-dynamics controller** holds the tracking and torque limits over a wider range of motion speeds than the PD+gravity baseline. The recommended architecture is **inverse-dynamics control with momentum-observer estimation**.
+
+Design requirements the system is graded against: **C1** joint error ≤ ±2°, **C2** commanded torque ≤ 0.95× actuator limit, **E1** estimation error < 5 %, **E2** payload range 10 g–3 kg.
+
+## Two pipelines
+
+The same estimators run behind a single per-tick observation contract in either of two mission pipelines:
+
+| | Weighing pipeline (legacy FSM) | Tracking pipeline |
+|---|---|---|
+| Entry | `mission.py`, `verify_estimators.py` | `mission_tracking.py`, `compare_tracking_controllers.py` |
+| Motion | discrete FSM steps, setpoint jumps | smooth LSPB joint trajectories with `q, q̇, q̈` references |
+| Weighing | dedicated WEIGH state, stationary hold | flagged trajectory segment — can sample **during the lift** |
+| Payload | cube physically grasped by the 2F-85 (contact) | cube pinned to the EE, weight applied as a pure force |
 
 ## Setup
 
 Python 3.11 is recommended.
-
-Create and activate a virtual environment, then install:
 
 ```bash
 py -3.11 -m venv .venv
@@ -27,94 +48,73 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-A quick smoke check that MuJoCo is wired up:
+Smoke-check that MuJoCo is wired up — the viewer should show the UR5e on a pedestal, a conveyor with a grey cube, and two coloured drop bins:
 
 ```bash
 python -m mujoco.viewer --mjcf=software/assets/scene.xml
 ```
 
-The viewer should open with the UR5e on a pedestal, a conveyor in front of it, a single grey cube on the conveyor, and two coloured drop zones for light and heavy bins.
+## Running
 
-## Running the estimator verification sweep
-
-`scripts/verify_estimators.py` runs every combination of estimator and cube mass through the full FSM, prints a per-trial table of true mass against estimated mass, and finishes with a per-estimator summary of mean error, mean absolute error, and RMSE. The script reuses a single MuJoCo environment across trials so the whole sweep runs in roughly twenty-five seconds for the default 75-trial grid (three estimators times 25 geometrically-spaced masses from 10 g to 2.5 kg).
+**Weighing pipeline.** `verify_estimators.py` runs every (estimator × cube mass) pair through the full FSM and prints a per-trial table plus a per-estimator summary of mean error, mean absolute error, and RMSE. The default grid is 4 estimators × 20 geometrically-spaced masses (10 g–3 kg). It reuses one MuJoCo environment across trials and writes a timestamped CSV to the gitignored `results/`.
 
 ```bash
-# Default sweep: all three estimators, 25 masses, 10 g to 2.5 kg
-python software/scripts/verify_estimators.py
-
-# Start with a clean calibration cache (recomputes baselines in-sim):
-python software/scripts/verify_estimators.py --clear-cache
-
-# Custom mass list, restricted to one estimator:
-python software/scripts/verify_estimators.py --estimator lyapunov --masses 0.1,0.2,0.3,0.5,0.8
-
-# Watch the whole sweep in one continuous viewer window:
-python software/scripts/verify_estimators.py --viewer
+python software/scripts/verify_estimators.py                    # full sweep
+python software/scripts/verify_estimators.py --clear-cache      # recompute empty-arm baselines
+python software/scripts/verify_estimators.py --estimator momentum_observer --masses 0.1,0.3,0.5
+python software/scripts/plot_results.py results/sweep_*.csv     # 2x2 dashboard
 ```
 
-Every run also writes the per-trial table to a timestamped CSV under `results/` at the repo root. The script prints the path on exit; the folder is gitignored so logs from local sweeps stay out of version control.
-
-Trials with absolute error above a 25% threshold are tagged with a `high err` note in the table; the script still exits zero (the focus is on the response curve, not a pass/fail gate). Change `M_MIN`, `M_MAX`, or `N_MASSES` at the top of the script to widen, narrow, or densify the sweep.
-
-## Running a specific mission
-
-A single mission is one pickup, one weigh, one classification, one drop. The script is `software/scripts/mission.py`.
+A single mission (one pick, weigh, classify, drop) — the cube body is re-massed at startup:
 
 ```bash
-# Default: uses estimator and cube mass from configs/default.yaml
-python software/scripts/mission.py
-
-# Specify the cube mass for this run (the body is re-massed at startup):
-python software/scripts/mission.py --mass 0.35
-
-# Override the estimator for this run only, ignoring YAML:
-python software/scripts/mission.py --estimator pid_error
-python software/scripts/mission.py --estimator lyapunov
-
-# Watch it run in MuJoCo's passive viewer:
-python software/scripts/mission.py --viewer --mass 0.5
-
-# Skip the estimator entirely. Falls back to the Phase 3 pipeline,
-# which just picks up the cube and always drops it in the light bin:
-python software/scripts/mission.py --estimator none
+python software/scripts/mission.py --estimator pid_error --mass 0.35 --viewer
+python software/scripts/mission.py --estimator none      # skip weighing; always drops in the light bin
 ```
 
-The summary printed at the end gives the true mass, the estimated mass, the per-trial error in percent, and the bin label that the classifier picked.
+**Tracking pipeline.** Smooth LSPB trajectories with a choice of controller and estimator (`--profile tracking` uses the report's hand-tuned gains):
 
-## Running the test suite
+```bash
+python software/scripts/mission_tracking.py --controller inverse_dynamics \
+    --estimator momentum_observer --mass 0.5 --profile tracking --viewer
+python software/scripts/compare_tracking_controllers.py --profile tracking --masses 0.5
+python software/scripts/sweep_tracking_payload_limits.py    # pass/fail vs C1 (≤2°) and C2 (≤0.95)
+```
 
-Unit tests sit in `software/tests/` and cover the estimator maths (no MuJoCo), the calibration cache, the controller's override hooks, the registry, the classifier, and a small set of end-to-end pipeline tests that exercise the full FSM through MuJoCo.
+`integration_grasp_sweep.py` re-runs the controller × estimator integration study in the *physically grasped* FSM pipeline, where contact forces (not a clean injected force) expose each estimator's true accuracy. The `plot_*` scripts regenerate the report figures from sweep CSVs.
+
+## Tests
 
 ```bash
 python -m pytest software/tests -q
 ```
 
-The whole suite (around 75 tests) finishes in roughly six seconds.
+Around 70 tests covering the estimator maths (no MuJoCo), the calibration cache, controller overrides, the registry, the classifier, and end-to-end FSM pipeline runs through MuJoCo — roughly six seconds total.
 
-## How to swap in a new estimator
+## Adding an estimator or controller
 
-The estimator interface lives in `software/massaware/estimators/base.py`. The contract is small: a subclass declares whether it needs calibration, optionally overrides the per-joint gravity-compensation mask and the controller gains it wants while it is measuring, and implements four methods (`reset`, `update`, `estimate`, plus the calibration trio when needed). Concrete estimators self-register at import time, so the pipeline picks them up automatically once their module is imported in `mission.py`.
-
-A minimal new estimator therefore costs one new file in `software/massaware/estimators/`, one `register("<name>", <Class>)` call at module bottom, one config block in `configs/default.yaml` if the estimator has tunables, and one import line in `mission.py`. Nothing in the planner, controller, or scene changes.
+The estimator interface is in [software/massaware/estimators/base.py](software/massaware/estimators/base.py). A subclass declares whether it needs calibration, optionally overrides its per-joint gravity-comp mask and the controller gains it wants while measuring, and implements `reset`/`update`/`estimate` (plus the calibration trio when needed). Estimators self-register at import, so a new one costs one file in `estimators/`, a `register("<name>", <Class>)` call, an optional YAML block in `configs/default.yaml`, and an import in the entry script. A new tracking controller subclasses the base in [software/massaware/controllers/](software/massaware/controllers/) and adds a branch in `mission_tracking.make_controller` plus gains in `profiles.py`. Nothing else in the planner or scene changes.
 
 ## Project layout
 
 ```
-docs/                          design notes and per-estimator write-ups
+docs/                          report PDFs (references/) and an example sweep (examples/)
+results/                       gitignored sweep CSVs
 software/
-├── assets/                    MuJoCo scene plus the vendored UR5e and 2f85 gripper
+├── assets/                    MuJoCo scene + vendored UR5e and Robotiq 2F-85 (new_gripper/2f85.xml)
 ├── massaware/
-│   ├── mujoco_env.py          thin sim wrapper, runtime mass-swap helper
-│   ├── robot.py               FK / IK / Jacobian
-│   ├── controller.py          joint-space PID with per-estimator gain overrides
+│   ├── mujoco_env.py          sim wrapper: state, qfrc_bias, mass matrix, runtime mass-swap
+│   ├── robot.py               FK / IK / EE Jacobian
+│   ├── controller.py          legacy setpoint PID (FSM pipeline)
 │   ├── planner.py             FSM (INIT, SEARCH, GRASP, WEIGH, CLASSIFY, PLACE, HOME, ERROR)
-│   ├── tick_loop.py           the single owner of mj_step plus the estimator dispatch
+│   ├── tick_loop.py           single mj_step owner for the FSM pipeline; builds EstimatorObs
 │   ├── classify.py            threshold classifier
+│   ├── config.py              YAML loader (pose degrees → radians)
 │   ├── perception/            ground-truth backend now, CV backend later
-│   └── estimators/            base interface, registry, pid_error.py, lyapunov.py, momentum_observer.py
-├── configs/                   default.yaml plus the autogenerated calibration.yaml
-├── scripts/                   mission.py, verify_estimators.py
+│   ├── estimators/            base + registry + pid_error, lyapunov, momentum_observer, inverse_dynamics
+│   └── controllers/           tracking pipeline: LSPB trajectories, analytical IK, payload model, 2 controllers
+├── configs/                   default.yaml + autogenerated calibration.yaml
+├── scripts/                   mission*, verify_estimators, compare/sweep, plotting
 └── tests/                     pytest suite
 requirements.txt
 ```
